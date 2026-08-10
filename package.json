@@ -1,0 +1,37 @@
+{
+  "name": "places-utilities",
+  "version": "0.0.1",
+  "description": "Companion utilities for Places, with track classification, track naming, track building, and route playback.",
+  "main": "main.js",
+  "scripts": {
+    "lint": "eslint src --ext .ts,.tsx,.js,.jsx",
+    "rename": "node -e \"require('fs').rename('main.css', 'styles.css', () => { })\"",
+    "generate-help": "md-to-obsidian-dom ./help-md ./src/generated-help --prefix places-utilities-help --grammar ./help-grammar.mjs && node -e \"const fs=require('fs'),p=require('path'),walk=d=>fs.readdirSync(d,{withFileTypes:true}).forEach(e=>{const fp=p.join(d,e.name);if(e.isDirectory())walk(fp);else if(e.name.endsWith('.generated.ts')){const c=fs.readFileSync(fp,'utf8');if(!c.startsWith('// @ts-nocheck'))fs.writeFileSync(fp,'// @ts-nocheck\\n'+c)}});walk('./src/generated-help')\"",
+    "dev": "npm run generate-help && node esbuild.config.mjs && npm run rename",
+    "build": "npm run generate-help && node esbuild.config.mjs production && npm run rename",
+    "typecheck": "tsc -noEmit -skipLibCheck",
+    "watch": "npm run generate-help && node esbuild.config.mjs watch"
+  },
+  "keywords": [],
+  "author": "Bob Stanton",
+  "license": "AGPL-3.0-only",
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "esbuild": "^0.28.1",
+    "eslint": "^8.57.1",
+    "md-to-obsidian-dom": "git+https://github.com/bobstanton/md-to-obsidian-dom.git#ac1da9e441ae5830780706a773863648e8718dfa",
+    "obsidian": "^1.13.1",
+    "tslib": "^2.8.1",
+    "typescript": "6.0.3"
+  },
+  "dependencies": {
+    "@types/geojson": "^7946.0.16",
+    "maplibre-gl": "^5.24.0",
+    "places-shared": "git+https://github.com/bobstanton/places-shared.git#0.0.1"
+  },
+  "overrides": {
+    "typescript": "6.0.3"
+  }
+}

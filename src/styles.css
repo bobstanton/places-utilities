@@ -1,0 +1,374 @@
+/* Classify block (places-classify) */
+
+.places-track-playback-controls {
+  position: absolute;
+  z-index: 100;
+  right: var(--size-4-3);
+  bottom: var(--size-4-3);
+  left: var(--size-4-3);
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  max-width: 560px;
+  min-height: var(--input-height);
+  margin-inline: auto;
+  padding: var(--size-4-1) var(--size-4-2);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--background-primary) 92%, transparent);
+  box-shadow: var(--shadow-s);
+  backdrop-filter: blur(8px);
+}
+
+.places-track-playback-position {
+  width: 18px;
+  height: 18px;
+  box-sizing: border-box;
+  border: 3px solid #ffffff;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  box-shadow: 0 1px 5px rgb(0 0 0 / 55%);
+  cursor: grab;
+}
+
+.places-track-playback-position:active {
+  cursor: grabbing;
+}
+
+.places-track-playback-color-probe {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.places-track-playback-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--input-height);
+  height: var(--input-height);
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
+.places-track-playback-button:hover,
+.places-track-playback-button.is-active {
+  background: var(--background-modifier-hover);
+  color: var(--text-accent);
+}
+
+.places-track-playback-slider {
+  flex: 1 1 auto;
+  min-width: 80px;
+}
+
+.places-track-playback-value {
+  min-width: 11em;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+.places-track-playback-error {
+  position: absolute;
+  z-index: 101;
+  right: 50%;
+  bottom: calc(var(--size-4-3) + var(--input-height) + var(--size-4-3));
+  width: max-content;
+  max-width: min(560px, calc(100% - 2 * var(--size-4-3)));
+  transform: translateX(50%);
+  padding: var(--size-4-2);
+  border: 1px solid var(--text-error);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+}
+
+.places-track-builder-layer-control {
+  position: relative;
+  display: inline-flex;
+}
+
+/*
+ * Opens upward: the track-builder toolbar is pinned to the bottom edge of the
+ * map, so a downward menu lands outside the map and is clipped. The height cap
+ * is measured at open time (setLayerPickerOpen) because the space above the
+ * toolbar depends on the block's map height, which CSS cannot see from here.
+ */
+.places-track-builder-layer-picker {
+  position: absolute;
+  z-index: 40;
+  bottom: calc(100% + var(--size-4-1));
+  left: 0;
+  width: min(380px, 80vw);
+  max-height: var(--places-layer-picker-max-height, min(520px, 65vh));
+  overflow: auto;
+  padding: var(--size-4-2);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-l);
+  color: var(--text-normal);
+}
+
+.places-track-builder-layer-picker-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--size-4-3);
+  margin-bottom: var(--size-4-2);
+}
+
+.places-track-builder-layer-picker-header strong {
+  flex: 1 1 auto;
+}
+
+/* The copy button is an icon among baseline-aligned text, so centre it. */
+.places-track-builder-layer-copy {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: var(--size-2-1);
+}
+
+.places-track-builder-layer-picker-header span,
+.places-track-builder-layer-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.places-track-builder-layer-group + .places-track-builder-layer-group {
+  margin-top: var(--size-4-2);
+  padding-top: var(--size-4-2);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.places-track-builder-layer-group-title {
+  padding: var(--size-4-1);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+}
+
+.places-track-builder-layer-children {
+  margin-left: var(--size-4-4);
+}
+
+.places-track-builder-layer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  min-height: 28px;
+  padding: 2px var(--size-4-1);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.places-track-builder-layer-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.places-track-builder-layer-row.is-group {
+  font-weight: var(--font-semibold);
+}
+
+.places-track-builder-layer-row input {
+  margin: 0;
+}
+
+.places-track-builder-layer-name {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.places-track-builder-layer-count {
+  min-width: 2em;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+.places-track-builder-export-control {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--size-2-1);
+}
+
+.places-classify-container {
+  margin: 0;
+  padding: 0;
+  background-color: var(--background-primary);
+}
+
+.places-classify-name-row {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--size-4-1);
+}
+
+.places-classify-action-status:not(:empty) {
+  flex-basis: 100%;
+}
+
+.places-action-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.places-action-status.is-success {
+  color: var(--text-success);
+}
+
+.places-classify-name {
+  font-size: var(--font-ui-large);
+  font-weight: var(--font-semibold);
+  flex: 1;
+  min-width: 0;
+}
+
+.places-classify-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin-bottom: var(--size-4-2);
+}
+
+.places-classify-meta-warning {
+  color: var(--text-warning);
+}
+
+.places-classify-map-wrap {
+  position: relative;
+}
+
+.places-classify-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-1);
+  margin-bottom: var(--size-4-2);
+}
+
+.places-classify-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--size-4-2) 2px var(--size-4-1);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l);
+  background-color: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.places-classify-chip.is-checked {
+  border-color: var(--interactive-accent);
+  background-color: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-secondary));
+}
+
+.places-classify-chip input[type="checkbox"] {
+  margin: 0;
+}
+
+.places-classify-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.places-classify-chip-distance {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.places-classify-name-empty {
+  color: var(--text-muted);
+  font-weight: var(--font-normal);
+}
+
+.places-classify-chip-pending {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 2px var(--size-4-1);
+}
+
+.places-classify-chips-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+
+/* =============================================================================
+ * Generated help tables - identical presentation to the main plugin's
+ * places-help-table rules; each plugin carries its own copy because plugin
+ * styles are self-contained.
+ * ============================================================================= */
+.places-utilities-help-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--size-4-2);
+}
+
+/* Horizontal scroll for wide tables */
+.places-utilities-help-table-scroll,
+.places-utilities-help-table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.places-utilities-help-table-scroll .places-utilities-help-table {
+  min-width: max-content;
+}
+
+.places-utilities-help-table-scroll .places-utilities-help-table th,
+.places-utilities-help-table-scroll .places-utilities-help-table td {
+  white-space: nowrap;
+}
+
+.places-utilities-help-table th,
+.places-utilities-help-table thead tr th,
+.places-utilities-help-table tr th {
+  background-color: var(--background-secondary);
+  padding: var(--size-4-2);
+  text-align: left;
+  font-weight: var(--font-semibold);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* Obsidian's app.css stripes header columns (.markdown-rendered thead tr > th:nth-child(2n+2)
+   with var(--table-column-alt-background)). Out-specify it so every help-table header cell
+   keeps the same background. */
+.markdown-rendered .places-utilities-help-table thead tr > th:nth-child(2n+2),
+.cm-html-embed .places-utilities-help-table thead tr > th:nth-child(2n+2),
+.places-utilities-help-table thead tr > th:nth-child(2n+2) {
+  background-color: var(--background-secondary);
+}
+
+.places-utilities-help-table td {
+  padding: var(--size-4-2);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* No row hover highlight. Obsidian's app.css tints rows on hover
+   (.markdown-rendered tbody tr:hover, var(--table-row-background-hover)); out-specify it. */
+.markdown-rendered .places-utilities-help-table tbody tr:hover,
+.cm-html-embed .places-utilities-help-table tbody tr:hover,
+.places-utilities-help-table tbody tr:hover {
+  background-color: transparent;
+}
