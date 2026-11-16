@@ -1,4 +1,3 @@
-/* Classify block (places-classify) */
 
 .places-track-playback-controls {
   position: absolute;
@@ -98,12 +97,6 @@
   display: inline-flex;
 }
 
-/*
- * Opens upward: the track-builder toolbar is pinned to the bottom edge of the
- * map, so a downward menu lands outside the map and is clipped. The height cap
- * is measured at open time (setLayerPickerOpen) because the space above the
- * toolbar depends on the block's map height, which CSS cannot see from here.
- */
 .places-track-builder-layer-picker {
   position: absolute;
   z-index: 40;
@@ -132,7 +125,6 @@
   flex: 1 1 auto;
 }
 
-/* The copy button is an icon among baseline-aligned text, so centre it. */
 .places-track-builder-layer-copy {
   flex: 0 0 auto;
   align-self: center;
@@ -219,6 +211,11 @@
   gap: var(--size-4-3);
   flex-wrap: wrap;
   margin-bottom: var(--size-4-1);
+  padding-inline-end: calc(var(--size-2-2, 4px) + 30px + var(--size-2-1, 2px));
+}
+
+.places-classify-rename {
+  flex: 0 0 auto;
 }
 
 .places-classify-action-status:not(:empty) {
@@ -255,6 +252,24 @@
   position: relative;
 }
 
+.places-classify-map-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--size-4-2);
+  margin-bottom: var(--size-4-2);
+}
+
+.places-classify-map-only {
+  flex: 0 0 auto;
+  font-size: var(--font-ui-smaller);
+}
+
+.places-classify-map-only[aria-pressed="true"] {
+  color: var(--text-on-accent);
+  background-color: var(--interactive-accent);
+}
+
 .places-classify-chips {
   display: flex;
   flex-wrap: wrap;
@@ -265,15 +280,67 @@
 .places-classify-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px var(--size-4-2) 2px var(--size-4-1);
+  gap: 2px;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-l);
   background-color: var(--background-secondary);
   font-size: var(--font-ui-smaller);
-  cursor: pointer;
   white-space: nowrap;
   max-width: 100%;
+}
+
+.places-classify-chip-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--size-4-2) 2px var(--size-4-1);
+  min-width: 0;
+  cursor: pointer;
+}
+
+.places-classify-chip.is-inspected {
+  outline: 2px solid #8b5cf6;
+  outline-offset: 1px;
+}
+
+.places-classify-chip .places-classify-inspect {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  height: auto;
+  margin: 1px 2px 1px 0;
+  padding: 4px;
+  border: 0;
+  border-radius: var(--radius-l);
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.places-classify-chip .places-classify-inspect:hover,
+.places-classify-chip .places-classify-inspect[aria-pressed="true"] {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.places-classify-inspect .svg-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.places-classify-chip .places-classify-inspect:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+@media (pointer: coarse) {
+  .places-classify-chip .places-classify-inspect {
+    min-width: 40px;
+    min-height: 40px;
+  }
 }
 
 .places-classify-chip.is-checked {
@@ -314,18 +381,12 @@
 }
 
 
-/* =============================================================================
- * Generated help tables - identical presentation to the main plugin's
- * places-help-table rules; each plugin carries its own copy because plugin
- * styles are self-contained.
- * ============================================================================= */
 .places-utilities-help-table {
   width: 100%;
   border-collapse: collapse;
   margin-top: var(--size-4-2);
 }
 
-/* Horizontal scroll for wide tables */
 .places-utilities-help-table-scroll,
 .places-utilities-help-table-wrapper {
   max-width: 100%;
@@ -351,9 +412,6 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
-/* Obsidian's app.css stripes header columns (.markdown-rendered thead tr > th:nth-child(2n+2)
-   with var(--table-column-alt-background)). Out-specify it so every help-table header cell
-   keeps the same background. */
 .markdown-rendered .places-utilities-help-table thead tr > th:nth-child(2n+2),
 .cm-html-embed .places-utilities-help-table thead tr > th:nth-child(2n+2),
 .places-utilities-help-table thead tr > th:nth-child(2n+2) {
@@ -365,8 +423,6 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
-/* No row hover highlight. Obsidian's app.css tints rows on hover
-   (.markdown-rendered tbody tr:hover, var(--table-row-background-hover)); out-specify it. */
 .markdown-rendered .places-utilities-help-table tbody tr:hover,
 .cm-html-embed .places-utilities-help-table tbody tr:hover,
 .places-utilities-help-table tbody tr:hover {

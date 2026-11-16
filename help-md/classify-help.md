@@ -17,19 +17,19 @@ Omit `track` to use the current note.
 
 ## Settings
 
-| Setting       | Description                                                                         | Examples                                         |
-| ------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------ |
-| track         | Wiki-link to the track file. Defaults to the current note                           | `[[Lake Scranton Weekend Run]]`                  |
-| matchProvider | Track match service used for trail and road names                                   | **valhalla**, {{dynamic:trackMatchProviderNames}} |
-| costing       | Travel profile for track matching                                                   | **pedestrian**, bicycle, auto                    |
-| radius        | Corridor distance for nearby feature discovery. Uses configured units (meters/feet) | **100**, 50, 200                                 |
-| features      | Feature kinds considered as name candidates; omit for all                           | `water, island, peak` — from: peak, water, waterfall, viewpoint, park, campground, store, restaurant, landmark, island |
-| height        | Height of the map                                                                   | **400px**, 300px, 500px                          |
-| width         | Width of the map                                                                    | **100%**, 50%, 800px                             |
-| mapProvider   | Which map provider to use                                                           | **default**, any installed map provider          |
-| style         | Map style (provider-specific)                                                       | varies by provider                               |
-| showMap       | Show the track map with candidate markers                                           | **true**, false                                  |
-| autorefresh   | Re-render when the vault index changes                                              | **true**, false                                  |
+| Setting         | Description                                                                                                                                                                            | Examples                                                                                                               |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| track           | Wiki-link to the track file. Defaults to the current note                                                                                                                              | `[[Lake Scranton Weekend Run]]`                                                                                        |
+| matchProvider   | Track match service used for trail and road names                                                                                                                                      | **valhalla**, {{dynamic:trackMatchProviderNames}}                                                                      |
+| costing         | Travel profile for track matching                                                                                                                                                      | **pedestrian**, bicycle, auto                                                                                          |
+| radius          | Corridor distance for nearby feature discovery. Uses configured units (meters/feet)                                                                                                    | **100**, 50, 200                                                                                                       |
+| features        | Feature kinds considered as name candidates; omit for all                                                                                                                              | `water, island, peak` — from: peak, water, waterfall, viewpoint, park, campground, store, restaurant, landmark, island |
+| height          | Height of the map                                                                                                                                                                      | **400px**, 300px, 500px                                                                                                |
+| width           | Width of everything the block renders, its legend and info included. A percentage measures the note's width, vw the window's                                                           | **100%**, 50%, 800px                                                                                                   |
+| mapProvider     | Which map provider to use                                                                                                                                                              | **default**, any installed map provider                                                                                |
+| style           | Map style (provider-specific)                                                                                                                                                          | varies by provider                                                                                                     |
+| showMap         | Show the track map with candidate markers                                                                                                                                              | **true**, false                                                                                                        |
+| queryParameters | UI controls that adjust the block without editing it; `queryParametersPosition`, `queryParametersLayout`, and `queryParametersCollapsed` place them. See `places-queryparameters-help` | `- name: limit`                                                                                                        |
 
 ## What Each Result Comes From
 

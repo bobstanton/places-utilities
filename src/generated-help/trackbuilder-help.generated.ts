@@ -107,7 +107,7 @@ export function render(container: HTMLElement, _ctx: RenderContext): void {
   row3.createEl('td', { text: "Lake Loop" });
   const row4 = tbody.createEl('tr');
   row4.createEl('td', { text: "snapRadiusMeters" });
-  row4.createEl('td', { text: "Initial magnet distance in metres" });
+  row4.createEl('td', { text: "Initial magnet distance in meters" });
   row4.createEl('td', { text: "25" });
   const row5 = tbody.createEl('tr');
   row5.createEl('td', { text: "respectGradeSeparation" });

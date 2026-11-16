@@ -164,7 +164,7 @@ export function render(container: HTMLElement, _ctx: RenderContext): void {
   row7.createEl('td', { text: "14, 16" });
   const row8 = tbody.createEl('tr');
   row8.createEl('td', { text: "lookAhead" });
-  row8.createEl('td', { text: "Metres ahead used to calculate a smoother route bearing." });
+  row8.createEl('td', { text: "Meters ahead used to calculate a smoother route bearing." });
   const td7 = row8.createEl('td');
   td7.createEl('strong', { cls: 'places-utilities-help-bold', text: "40" });
   td7.appendText(", 100");

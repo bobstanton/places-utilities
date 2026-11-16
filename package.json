@@ -1,37 +1,75 @@
 {
   "name": "places-utilities",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Companion utilities for Places, with track classification, track naming, track building, and route playback.",
   "main": "main.js",
   "scripts": {
-    "lint": "eslint src --ext .ts,.tsx,.js,.jsx",
+    "lint": "eslint src package.json manifest.json versions.json",
     "rename": "node -e \"require('fs').rename('main.css', 'styles.css', () => { })\"",
     "generate-help": "md-to-obsidian-dom ./help-md ./src/generated-help --prefix places-utilities-help --grammar ./help-grammar.mjs && node -e \"const fs=require('fs'),p=require('path'),walk=d=>fs.readdirSync(d,{withFileTypes:true}).forEach(e=>{const fp=p.join(d,e.name);if(e.isDirectory())walk(fp);else if(e.name.endsWith('.generated.ts')){const c=fs.readFileSync(fp,'utf8');if(!c.startsWith('// @ts-nocheck'))fs.writeFileSync(fp,'// @ts-nocheck\\n'+c)}});walk('./src/generated-help')\"",
-    "dev": "npm run generate-help && node esbuild.config.mjs && npm run rename",
-    "build": "npm run generate-help && node esbuild.config.mjs production && npm run rename",
+    "dev": "npm run dev:core && npm run dev:plugin",
+    "build": "npm run typecheck && npm run bundle",
     "typecheck": "tsc -noEmit -skipLibCheck",
-    "watch": "npm run generate-help && node esbuild.config.mjs watch"
+    "watch": "npm run dev:core && npm run generate-help && node esbuild.config.mjs watch",
+    "bundle": "npm run build:core && npm run bundle:plugin",
+    "build:core": "tsc -p tsconfig.core.json && node esbuild.core.mjs production",
+    "dev:core": "tsc -p tsconfig.core.json && node esbuild.core.mjs",
+    "watch:core": "node esbuild.core.mjs watch",
+    "prepare": "node --input-type=module -e \"import { hasBuiltExports } from './esbuild.library.mjs'; process.exit(hasBuiltExports() ? 0 : 1)\" || npm run bundle",
+    "bundle:plugin": "npm run generate-help && node esbuild.config.mjs production && npm run rename",
+    "dev:plugin": "npm run generate-help && node esbuild.config.mjs && npm run rename",
+    "format": "node ../../vaultquery-tests/scripts/lint.mjs --format-only --repo . --fix",
+    "format:check": "node ../../vaultquery-tests/scripts/lint.mjs --format-only --repo ."
   },
   "keywords": [],
   "author": "Bob Stanton",
   "license": "AGPL-3.0-only",
   "devDependencies": {
-    "@types/node": "^26.1.1",
-    "@typescript-eslint/eslint-plugin": "^8.63.0",
-    "@typescript-eslint/parser": "^8.63.0",
-    "esbuild": "^0.28.1",
-    "eslint": "^8.57.1",
+    "@eslint/js": "^9.39.5",
+    "@eslint/json": "^2.1.1",
+    "@types/node": "^26.6.6",
+    "@typescript-eslint/parser": "^8.72.2",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-obsidianmd": "^0.5.1",
     "md-to-obsidian-dom": "git+https://github.com/bobstanton/md-to-obsidian-dom.git#ac1da9e441ae5830780706a773863648e8718dfa",
-    "obsidian": "^1.13.1",
-    "tslib": "^2.8.1",
-    "typescript": "6.0.3"
+    "obsidian": "1.14.4",
+    "tslib": "^2.9.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "^8.72.2"
   },
   "dependencies": {
     "@types/geojson": "^7946.0.16",
-    "maplibre-gl": "^5.24.0",
-    "places-shared": "git+https://github.com/bobstanton/places-shared.git#0.0.1"
+    "maplibre-gl": "^6.18.0",
+    "places-shared": "git+https://github.com/bobstanton/places-shared.git#0.0.2"
   },
   "overrides": {
-    "typescript": "6.0.3"
-  }
+    "typescript": "6.0.3",
+    "obsidian": "1.14.4",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15"
+  },
+  "exports": {
+    ".": {
+      "require": "./main.js",
+      "import": "./main.js",
+      "default": "./main.js"
+    },
+    "./styles.css": "./styles.css",
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js",
+      "require": "./dist/core/index.cjs",
+      "default": "./dist/core/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "main.js",
+    "styles.css",
+    "*.mjs",
+    "*.json",
+    "globals.d.ts"
+  ]
 }

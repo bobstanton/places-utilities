@@ -1,6 +1,15 @@
 import { getError, sleep, withTimeout } from "places-shared/utils";
 import { logger } from "places-shared/utils";
 import { loggedRequestUrl as requestUrl } from "places-shared/utils";
+import { trackApiUsage, type ApiUsageOrigin, type ApiUsageRecorder } from "places-shared/services";
+
+const OVERPASS_USAGE = { provider: 'overpass', service: 'features' } as const;
+
+let usageRecorder: ApiUsageRecorder | undefined;
+
+export function configureOverpassUsage(recorder: ApiUsageRecorder | undefined): void {
+  usageRecorder = recorder;
+}
 
 // Rate limiter for the Overpass API requests used by track classification.
 //
@@ -25,6 +34,7 @@ const OVERPASS_REQUEST_HEADERS = {
 };
 
 interface QueuedRequest<T> {
+  origin?: ApiUsageOrigin;
   query: string;
   resolve: (value: T) => void;
   reject: (error: Error) => void;
@@ -47,9 +57,12 @@ class OverpassRateLimiterClass {
   private readonly resultsByQuery = new Map<string, { promise: Promise<unknown>; expiresAt: number }>();
   private static readonly RESULT_TTL_MS = 10 * 60_000;
 
-  async request<T>(query: string): Promise<T> {
+  async request<T>(query: string, origin?: ApiUsageOrigin): Promise<T> {
     const cached = this.resultsByQuery.get(query);
+
     if (cached && cached.expiresAt > Date.now()) {
+      usageRecorder?.record({ ...OVERPASS_USAGE, success: true, durationMs: 0, cached: true, ...(origin ? { origin } : {}) });
+
       return cached.promise as Promise<T>;
     }
 
@@ -57,22 +70,21 @@ class OverpassRateLimiterClass {
       this.requestQueue.push({
         query,
         resolve,
-        reject
+        reject,
+        ...(origin ? { origin } : {})
       });
       void this.processQueue();
     });
-    // The TTL runs from request start, not settle; entries also serve while in
-    // flight. Sweep expired entries here - the map is small and this is the
-    // only growth point.
+
     for (const [staleQuery, entry] of this.resultsByQuery) {
       if (entry.expiresAt <= Date.now()) this.resultsByQuery.delete(staleQuery);
     }
+
     this.resultsByQuery.set(query, { promise, expiresAt: Date.now() + OverpassRateLimiterClass.RESULT_TTL_MS });
     promise.catch(() => {
-      // Only clear the entry this promise owns - an expired-and-replaced entry
-      // belongs to a newer request.
       if (this.resultsByQuery.get(query)?.promise === promise) this.resultsByQuery.delete(query);
     });
+
     return promise as Promise<T>;
   }
 
@@ -87,7 +99,8 @@ class OverpassRateLimiterClass {
       const request = this.requestQueue.shift()!;
 
       try {
-        const result = await this.executeRequestWithRetry(request.query);
+        const result = await trackApiUsage(usageRecorder, { ...OVERPASS_USAGE, ...(request.origin ? { origin: request.origin } : {}) }, () => this.executeRequestWithRetry(request.query));
+
         request.resolve(result);
       } catch (error) {
         request.reject(getError(error));
@@ -115,18 +128,23 @@ class OverpassRateLimiterClass {
         if (attempt < this.maxRetries) {
           this.endpointIndex = (this.endpointIndex + 1) % OVERPASS_ENDPOINTS.length;
           logger.warn(`Overpass endpoint returned ${response.status}, switching to ${OVERPASS_ENDPOINTS[this.endpointIndex]}`);
+
           return this.executeRequestWithRetry(query, attempt + 1);
         }
+
         throw new Error(`Overpass API error: ${response.status} (all endpoints failed)`);
       }
 
       if (response.status === 429) {
         if (attempt < this.maxRetries) {
           const delay = this.retryDelayMs * (attempt + 1);
+
           logger.warn(`Overpass rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
           await sleep(delay);
+
           return this.executeRequestWithRetry(query, attempt + 1);
         }
+
         throw new Error(`Overpass API rate limited after ${this.maxRetries} retries`);
       }
 
@@ -139,14 +157,19 @@ class OverpassRateLimiterClass {
       if (error instanceof Error && error.message.includes("timed out") && attempt < this.maxRetries) {
         this.endpointIndex = (this.endpointIndex + 1) % OVERPASS_ENDPOINTS.length;
         logger.warn(`Overpass request timed out, switching to ${OVERPASS_ENDPOINTS[this.endpointIndex]}`);
+
         return this.executeRequestWithRetry(query, attempt + 1);
       }
+
       if (error instanceof Error && error.message.includes("429") && attempt < this.maxRetries) {
         const delay = this.retryDelayMs * (attempt + 1);
+
         logger.warn(`Overpass rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${this.maxRetries})`);
         await sleep(delay);
+
         return this.executeRequestWithRetry(query, attempt + 1);
       }
+
       throw error;
     }
   }

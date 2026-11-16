@@ -2,6 +2,8 @@
 
 Provider for [Places](https://community.obsidian.md/plugins/places), with track classification and naming, track building, and route playback.
 
+This is not a stand-alone plugin, to use, install along side [Places](https://community.obsidian.md/plugins/places). Refer to the [sandbox](https://sandbox.obsidian.stanton.dev/places/) for examples.
+
 ## Network requests
 
 | Area                     | Request                                                     |

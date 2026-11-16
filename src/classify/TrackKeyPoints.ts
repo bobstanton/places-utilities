@@ -21,6 +21,7 @@ export function findTurnaroundIndices(coordinates: Coordinate[]): number[] {
   }
 
   const distancesFromStart: number[] = [0];
+
   for (let i = 1; i < coordinates.length; i++) {
     distancesFromStart.push(DistanceCalculator.haversineDistanceMeters(coordinates[0].latitude, coordinates[0].longitude, coordinates[i].latitude, coordinates[i].longitude));
   }
@@ -32,6 +33,7 @@ export function findTurnaroundIndices(coordinates: Coordinate[]): number[] {
     const currentDist = distancesFromStart[i];
 
     let isLocalMax = true;
+
     for (let j = i - windowSize; j <= i + windowSize; j++) {
       if (j !== i && distancesFromStart[j] > currentDist) {
         isLocalMax = false;
@@ -41,14 +43,17 @@ export function findTurnaroundIndices(coordinates: Coordinate[]): number[] {
 
     if (isLocalMax && currentDist > 100) {
       const headingChange = calculateHeadingChange(coordinates, i, windowSize);
+
       candidates.push({ index: i, score: currentDist * (1 + headingChange / 180) });
     }
   }
 
   for (let i = windowSize; i < coordinates.length - windowSize; i++) {
     const headingChange = calculateHeadingChange(coordinates, i, windowSize);
+
     if (headingChange > 120) {
       const alreadyFound = candidates.some(c => Math.abs(c.index - i) < windowSize * 2);
+
       if (!alreadyFound) {
         candidates.push({ index: i, score: distancesFromStart[i] * (1 + headingChange / 180) });
       }
@@ -62,6 +67,7 @@ export function findTurnaroundIndices(coordinates: Coordinate[]): number[] {
 
   for (const candidate of candidates) {
     const tooClose = result.some(idx => Math.abs(candidate.index - idx) < minSeparation);
+
     if (!tooClose) {
       result.push(candidate.index);
     }
@@ -92,6 +98,7 @@ export function findDwellPoints(points: TrackPoint[], minDwellSeconds = 60): Dwe
 
   const closeCluster = (endIndex: number) => {
     const durationSeconds = (points[endIndex].time!.getTime() - points[dwellStart].time!.getTime()) / 1000;
+
     if (durationSeconds >= minDwellSeconds && pointsInDwell >= 3) {
       dwellPoints.push({
         index: Math.floor((dwellStart + endIndex) / 2),
@@ -116,6 +123,7 @@ export function findDwellPoints(points: TrackPoint[], minDwellSeconds = 60): Dwe
       pointsInDwell = 1;
     }
   }
+
   closeCluster(points.length - 1);
 
   const minIdx = Math.floor(points.length * 0.05);
@@ -133,6 +141,7 @@ export function findSummitIndex(points: TrackPoint[]): number {
 
   for (let i = 0; i < points.length; i++) {
     const elev = points[i].elevationMeters;
+
     if (elev !== undefined && (elev as number) > maxElev) {
       maxElev = elev;
       maxIdx = i;
@@ -152,18 +161,22 @@ export function containmentQueryPoints(points: TrackPoint[]): Coordinate[] {
   const candidates: Coordinate[] = [coordinates[Math.floor(coordinates.length / 2)]];
 
   const turnarounds = findTurnaroundIndices(coordinates);
+
   if (turnarounds.length > 0) {
     candidates.push(coordinates[turnarounds[0]]);
   }
 
   const dwells = findDwellPoints(points);
+
   if (dwells.length > 0) {
     candidates.push(dwells[0].centerCoord);
   }
 
   const result: Coordinate[] = [];
+
   for (const candidate of candidates) {
     const nearExisting = result.some(existing => DistanceCalculator.haversineDistanceMeters(existing.latitude, existing.longitude, candidate.latitude, candidate.longitude) < 200);
+
     if (!nearExisting) {
       result.push(candidate);
     }
@@ -180,6 +193,7 @@ function calculateHeadingChange(coordinates: Coordinate[], index: number, window
   const headingAfter = calculateBearing(coordinates[index], coordinates[afterIdx]);
 
   let change = Math.abs(headingAfter - headingBefore);
+
   if (change > 180) {
     change = 360 - change;
   }
@@ -196,5 +210,6 @@ function calculateBearing(from: Coordinate, to: Coordinate): number {
   const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
 
   const bearing = Math.atan2(y, x) * 180 / Math.PI;
+
   return (bearing + 360) % 360;
 }

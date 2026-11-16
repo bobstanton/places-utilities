@@ -1,13 +1,14 @@
 import { normalizePath, Notice, setIcon, type App } from 'obsidian';
 import type * as GeoJSON from 'geojson';
-import { addTrackBuilderWaypoint, appendTrackBuilderSection, appendTrackBuilderSections, clearTrackBuilderDraft, ensureTrackDirectionArrowImage, getTrackBuilderHistory, insertDirectTrackBuilderSection, prependTrackBuilderSections, redoTrackBuilderEdit, removeLastTrackBuilderSection, removeTrackBuilderWaypoint, replaceTrackBuilderContent, reverseTrackBuilderSection, replaceTrackBuilderSection, replaceTrackBuilderSections, serializeTrackBuilderGpx, trackBuilderDraftKey, trackBuilderSegments, trackBuilderWaypoints, trackDataToTrackBuilderSections, trackDataToTrackBuilderWaypoints, undoTrackBuilderEdit, updateTrackBuilderWaypoint, type TrackBuilderCoordinate, type TrackBuilderLinePosition, type TrackBuilderSection, type TrackBuilderSectionEndpoint, type TrackBuilderWaypoint } from 'places-shared/map';
-import type { MapSourceContext, MapTrackLoader, TrackBuilderConfig } from 'places-shared/settings';
-import type { TrackData } from 'places-shared/geo';
-import { getErrorMessage, downloadOrCopy, hashString36, logger, PLACES_EXPORTS_FOLDER, sharedRegistryMap, StringCompressor, Utilities } from 'places-shared/utils';
-import { buildTrackNoteFrontmatter } from 'places-shared/services';
-import { km, type UnitsSystem } from 'places-shared/units';
-import { coordinateFromPosition, DistanceCalculator } from 'places-shared/geo';
-import { createOverlayNote } from 'places-shared/services';
+import { addTrackBuilderWaypoint, appendTrackBuilderSection, appendTrackBuilderSections, clearTrackBuilderDraft, getTrackBuilderHistory, insertDirectTrackBuilderSection, prependTrackBuilderSections, redoTrackBuilderEdit, removeLastTrackBuilderSection, removeTrackBuilderWaypoint, replaceTrackBuilderContent, reverseTrackBuilderSection, replaceTrackBuilderSection, replaceTrackBuilderSections, serializeTrackBuilderGpx, trackBuilderDraftKey, trackBuilderSegments, trackBuilderWaypoints, trackDataToTrackBuilderSections, trackDataToTrackBuilderWaypoints, undoTrackBuilderEdit, updateTrackBuilderWaypoint, type TrackBuilderCoordinate, type TrackBuilderLinePosition, type TrackBuilderSection, type TrackBuilderSectionEndpoint, type TrackBuilderWaypoint } from 'places-utilities/core';
+import { ensureTrackDirectionArrowImage, resolveWaypointIcon } from "places-shared/map";
+import type { MapSourceContext, MapTrackLoader, TrackBuilderConfig } from "places-shared/settings";
+import type { TrackData } from "places-shared/geo";
+import { getErrorMessage, hashString36, logger, PLACES_EXPORTS_FOLDER, sharedRegistryMap, Utilities } from "places-shared/utils";
+import { downloadOrCopy } from "places-shared/obsidian/utils";
+import type { PlaceNoteHost } from "places-shared/map";
+import { km } from "places-shared/units";
+import { coordinateFromPosition, DistanceCalculator } from "places-shared/geo";
 import type * as maplibregl from 'maplibre-gl';
 import { isTrackBuilderTurnaround, uniqueTrackBuilderRayCount, type TrackBuilderScreenPoint } from './TrackBuilderDirectEndpoints';
 import { areTrackBuilderJunctionSectionsCompatible, closestCompatibleTrackBuilderJunction, compatibleTrackBuilderJunctions } from './TrackBuilderJunction';
@@ -16,6 +17,7 @@ import { bestTrackBuilderContinuation, closestTrackBuilderLinePosition, localSel
 import { closestTrackBuilderProjectedPosition, createTrackBuilderCandidateIndex, trackBuilderCandidateBounds, trackBuilderCandidatesAt, type TrackBuilderCandidateIndex, type TrackBuilderCandidateBounds, type TrackBuilderProjectedCandidate } from './TrackBuilderSpatialIndex';
 import { TrackBuilderWaypointModal } from './TrackBuilderWaypointModal';
 import { chooseTrackEndpointContinuation, clipEndpointOverlapSamples, connectedTracePrefix, expandRepeatedFeatureBacktracks, resolveCenterBasedTraceRun, shouldBridgeNearbyTrackEndpoint, shouldKeepPreferredTrackCandidate, shouldTrimEndpointToCurrentSource, TRACK_BRIDGE_MAX_DISTANCE_METERS, type TrackOverlapSample } from './TrackBuilderTrace';
+import { comparePositions, coordinateDistanceSquared, interpolateLine, positionsEqual, sectionLogData, sectionLogSummary, sliceLine } from './TrackBuilderControllerSupport';
 
 // Between the open picker and the map's top edge.
 const LAYER_PICKER_EDGE_GAP = 12;
@@ -64,7 +66,8 @@ interface TrackBuilderControllerOptions {
   readonly container: HTMLElement;
   readonly source: MapSourceContext;
   readonly config: TrackBuilderConfig;
-  readonly units: UnitsSystem;
+  readonly placeNoteHost?: PlaceNoteHost;
+  readonly runProgrammaticCamera: (move: () => void) => void;
   readonly trackLoader?: MapTrackLoader;
 }
 
@@ -151,82 +154,7 @@ interface SelectableLayerGroup {
   readonly layers: readonly { id: string; count: number }[];
 }
 
-function sectionLogData(section: TrackBuilderSection): Record<string, unknown> {
-  return {
-    id: section.id,
-    sourceFeatureKey: section.sourceFeatureKey,
-    layerId: section.layerId,
-    sourceLayer: section.sourceLayer,
-    featureId: section.featureId,
-    name: section.name,
-    sourceProperties: section.sourceProperties,
-    startPosition: section.startPosition,
-    endPosition: section.endPosition,
-    coordinates: section.coordinates,
-    sourceCoordinates: section.sourceCoordinates,
-    breakBefore: section.breakBefore,
-  };
-}
-
-function sectionLogSummary(section: TrackBuilderSection): Record<string, unknown> {
-  return {
-    id: section.id,
-    sourceFeatureKey: section.sourceFeatureKey,
-    layerId: section.layerId,
-    sourceLayer: section.sourceLayer,
-    featureId: section.featureId,
-    name: section.name,
-    startPosition: section.startPosition,
-    endPosition: section.endPosition,
-    coordinateCount: section.coordinates.length,
-    sourceCoordinateCount: section.sourceCoordinates?.length,
-    breakBefore: section.breakBefore,
-  };
-}
-
-function interpolateLine(coordinates: readonly TrackBuilderCoordinate[], position: TrackBuilderLinePosition): TrackBuilderCoordinate {
-  const index = Math.max(0, Math.min(coordinates.length - 2, position.segmentIndex));
-  const a = coordinates[index];
-  const b = coordinates[index + 1];
-  return [a[0] + (b[0] - a[0]) * position.t, a[1] + (b[1] - a[1]) * position.t];
-}
-
-function sliceLine(coordinates: readonly TrackBuilderCoordinate[], start: TrackBuilderLinePosition, end: TrackBuilderLinePosition): TrackBuilderCoordinate[] {
-  if (comparePositions(start, end) > 0) return sliceLine(coordinates, end, start).reverse();
-  const result: TrackBuilderCoordinate[] = [interpolateLine(coordinates, start)];
-  for (let index = start.segmentIndex + 1; index <= end.segmentIndex; index++) {
-    const coordinate = coordinates[index];
-    const previous = result[result.length - 1];
-    if (previous[0] !== coordinate[0] || previous[1] !== coordinate[1]) result.push(coordinate);
-  }
-  const finalCoordinate = interpolateLine(coordinates, end);
-  const previous = result[result.length - 1];
-  if (previous[0] !== finalCoordinate[0] || previous[1] !== finalCoordinate[1]) result.push(finalCoordinate);
-  return result;
-}
-
-function comparePositions(a: TrackBuilderLinePosition, b: TrackBuilderLinePosition): number {
-  return a.segmentIndex - b.segmentIndex || a.t - b.t;
-}
-
-function positionsEqual(a: TrackBuilderLinePosition, b: TrackBuilderLinePosition): boolean {
-  return Math.abs((a.segmentIndex + a.t) - (b.segmentIndex + b.t)) < 1e-9;
-}
-
-function coordinateDistanceSquared(a: TrackBuilderCoordinate, b: TrackBuilderCoordinate): number {
-  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
-}
-
-function geographicDistanceMeters(a: TrackBuilderCoordinate, b: TrackBuilderCoordinate): number {
-  const radians = Math.PI / 180;
-  const dLatitude = (b[1] - a[1]) * radians;
-  const dLongitude = (b[0] - a[0]) * radians;
-  const latitudeA = a[1] * radians;
-  const latitudeB = b[1] * radians;
-  const haversine = Math.sin(dLatitude / 2) ** 2
-    + Math.cos(latitudeA) * Math.cos(latitudeB) * Math.sin(dLongitude / 2) ** 2;
-  return 6371000 * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
-}
+type TrackBuilderMode = 'idle' | 'build' | 'delete' | 'direct' | 'join' | 'snap' | 'waypoint';
 
 export class TrackBuilderController {
   private readonly key: string;
@@ -239,10 +167,13 @@ export class TrackBuilderController {
   private layerSelectionCustomized = false;
   private layerPicker?: HTMLElement;
   private layerPickerButton?: HTMLButtonElement;
-  private active = false;
-  private deleting = false;
-  private direct = false;
-  private snapping = false;
+  private mode: TrackBuilderMode = 'idle';
+  private get active(): boolean { return this.mode === 'build'; }
+  private get deleting(): boolean { return this.mode === 'delete'; }
+  private get direct(): boolean { return this.mode === 'direct' || this.mode === 'join'; }
+  private get snapping(): boolean { return this.mode === 'snap'; }
+  private get joining(): boolean { return this.mode === 'join'; }
+  private get waypointing(): boolean { return this.mode === 'waypoint'; }
   private snapSelection?: SnapSelection;
   private snapActions?: HTMLElement;
   private snapApplyButton?: HTMLButtonElement;
@@ -254,8 +185,6 @@ export class TrackBuilderController {
   private snapPreview?: SnapPreview;
   private snapPreviewError?: string;
   private directAnchor?: DirectEndpointAnchor | { readonly coordinate: TrackBuilderCoordinate };
-  private joining = false;
-  private waypointing = false;
   private waypointActions?: HTMLElement;
   private selectedWaypointId?: string;
   private waypointMarkers: Array<{ readonly id: string; readonly marker: maplibregl.Marker }> = [];
@@ -297,33 +226,38 @@ export class TrackBuilderController {
   setup(): void {
     this.addSourcesAndLayers();
     const buildControl = this.toolbar.createDiv({ cls: 'places-track-builder-build-control' });
-    this.addButton('route', 'Build track', () => this.setActive(!this.active), 'places-track-builder-toggle', buildControl);
+
+    this.addButton('route', 'Build track', () => this.setMode(this.active ? 'idle' : 'build'), 'places-track-builder-toggle', buildControl);
     this.createSelectionIntensityControl(buildControl);
     this.createLayerPicker();
-    this.addButton('move-up-right', 'Draw direct line', () => this.setDirect(!this.direct), 'places-track-builder-direct');
-    this.addButton('git-merge', 'Join two track endpoints', () => this.setJoining(!this.joining), 'places-track-builder-join');
+    this.addButton('move-up-right', 'Draw direct line', () => this.setMode(this.direct ? 'idle' : 'direct'), 'places-track-builder-direct');
+    this.addButton('git-merge', 'Join two track endpoints', () => this.setMode(this.joining ? 'idle' : 'join'), 'places-track-builder-join');
     const snapControl = this.toolbar.createDiv({ cls: 'places-track-builder-snap-control' });
-    this.addButton('magnet', 'Snap a GPX portion to visible roads or trails', () => this.setSnapping(!this.snapping), 'places-track-builder-snap', snapControl);
+
+    this.addButton('magnet', 'Snap a GPX portion to visible roads or trails', () => this.setMode(this.snapping ? 'idle' : 'snap'), 'places-track-builder-snap', snapControl);
     this.createSnapActions(snapControl);
     this.addButton('undo-2', 'Undo selection', () => { undoTrackBuilderEdit(this.key); this.render(); });
     this.addButton('redo-2', 'Redo selection', () => { redoTrackBuilderEdit(this.key); this.render(); });
     this.addButton('arrow-left-right', 'Reverse track direction', () => this.reverseDirection());
     this.addButton('minus', 'Remove last section', () => { removeLastTrackBuilderSection(this.key); this.render(); });
     const waypointControl = this.toolbar.createDiv({ cls: 'places-track-builder-waypoint-control' });
-    this.addButton('map-pin', 'Add, move, or edit waypoints', () => this.setWaypointing(!this.waypointing), 'places-track-builder-waypoint', waypointControl);
+
+    this.addButton('map-pin', 'Add, move, or edit waypoints', () => this.setMode(this.waypointing ? 'idle' : 'waypoint'), 'places-track-builder-waypoint', waypointControl);
     this.waypointActions = waypointControl.createDiv({ cls: 'places-track-builder-waypoint-actions', attr: { 'aria-label': 'Waypoint actions' } });
     this.addButton('pencil', 'Edit the selected waypoint', () => this.editSelectedWaypoint(), 'places-track-builder-waypoint-edit', this.waypointActions);
     this.addButton('trash', 'Delete the selected waypoint', () => this.deleteSelectedWaypoint(), 'places-track-builder-waypoint-delete', this.waypointActions);
     const deleteControl = this.toolbar.createDiv({ cls: 'places-track-builder-delete-control' });
-    this.addButton('eraser', 'Delete or trim a section', () => this.setDeleting(!this.deleting), 'places-track-builder-delete', deleteControl);
+
+    this.addButton('eraser', 'Delete or trim a section', () => this.setMode(this.deleting ? 'idle' : 'delete'), 'places-track-builder-delete', deleteControl);
     this.deleteActions = deleteControl.createDiv({ cls: 'places-track-builder-delete-actions', attr: { 'aria-label': 'Delete selection actions' } });
     this.addButton('maximize-2', 'Select the whole section', () => this.selectWholeDeleteSections(), 'places-track-builder-delete-whole', this.deleteActions);
     this.addButton('check', 'Delete selected section or trimmed portion', () => this.applyDeleteSelection(), 'places-track-builder-delete-apply', this.deleteActions);
     this.addButton('x', 'Cancel delete selection', () => this.clearDeleteSelection(), 'places-track-builder-delete-cancel', this.deleteActions);
     this.addButton('trash-2', 'Clear track', () => { clearTrackBuilderDraft(this.key); this.render(); });
     const exportControl = this.toolbar.createDiv({ cls: 'places-track-builder-export-control' });
+
     this.addButton('download', 'Save as GPX', () => void this.exportGpx(), 'places-track-builder-export-gpx', exportControl);
-    this.addButton('file-plus-2', 'Create track note', () => void this.createTrackNote(), 'places-track-builder-export-note', exportControl);
+    if (this.options.placeNoteHost) this.addButton('file-plus-2', 'Create track note', () => void this.createTrackNote(), 'places-track-builder-export-note', exportControl);
     this.options.map.on('mousemove', this.onMouseMove);
     this.options.map.on('click', this.onClick);
     this.options.map.on('moveend', this.onMoveEnd);
@@ -339,17 +273,22 @@ export class TrackBuilderController {
     const configuredTracks = this.options.config.tracks.length > 0
       ? this.options.config.tracks
       : this.currentNoteTrackSetting();
+
     if (configuredTracks.length > 0) void this.loadConfiguredTracks(configuredTracks);
   }
 
   // Use this Markdown note's stored track when an empty builder block is embedded in it.
   private currentNoteTrackSetting(): readonly string[] {
     const sourcePath = this.options.source.path;
+
     if (!sourcePath?.toLowerCase().endsWith('.md')) return [];
     const file = this.options.app.vault.getFileByPath(normalizePath(sourcePath));
+
     if (!file) return [];
     const frontmatter = this.options.app.metadataCache.getFileCache(file)?.frontmatter;
+
     if (!frontmatter?.['Overlay Source'] && !frontmatter?.['Overlay Cache']) return [];
+
     return [sourcePath];
   }
 
@@ -369,6 +308,7 @@ export class TrackBuilderController {
 
   private addSourcesAndLayers(): void {
     const empty: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
+
     this.options.map.addSource(DRAFT_SOURCE, { type: 'geojson', data: empty });
     this.options.map.addSource(HOVER_SOURCE, { type: 'geojson', data: empty });
     this.options.map.addSource(DIRECT_PREVIEW_SOURCE, { type: 'geojson', data: empty });
@@ -377,6 +317,7 @@ export class TrackBuilderController {
     this.options.map.addLayer({ id: DRAFT_LAYER, type: 'line', source: DRAFT_SOURCE, filter: ['!=', ['get', 'routingMode'], 'direct'], paint: { 'line-color': '#7c3aed', 'line-width': 4 } });
     this.options.map.addLayer({ id: DRAFT_DIRECT_LAYER, type: 'line', source: DRAFT_SOURCE, filter: ['==', ['get', 'routingMode'], 'direct'], paint: { 'line-color': '#f59e0b', 'line-width': 4, 'line-dasharray': [2, 1.5] } });
     const directionImage = ensureTrackDirectionArrowImage(this.options.map);
+
     this.options.map.addLayer({ id: DIRECTION_LAYER, type: 'symbol', source: DRAFT_SOURCE, layout: { 'symbol-placement': 'line', 'symbol-spacing': ['interpolate', ['linear'], ['zoom'], 10, 340, 14, 260, 18, 180], 'icon-image': directionImage, 'icon-size': ['interpolate', ['linear'], ['zoom'], 10, 0.8, 12, 1.05, 14, 1.4, 16, 1.875], 'icon-anchor': 'center', 'icon-rotation-alignment': 'map', 'icon-pitch-alignment': 'map', 'icon-keep-upright': false, 'icon-allow-overlap': false, 'icon-ignore-placement': true, 'icon-padding': 8 }, paint: { 'icon-color': '#7c3aed', 'icon-halo-color': '#ffffff', 'icon-halo-width': 1.25 } });
     this.options.map.addLayer({
       id: HOVER_LAYER,
@@ -385,7 +326,7 @@ export class TrackBuilderController {
       paint: {
         // "new-piece" is a build hover that reaches no open end: clicking it
         // starts a separate segment rather than extending the route, and gets
-        // a colour of its own rather than the amber that means "continues here".
+        // a color of its own rather than the amber that means "continues here".
         'line-color': ['case',
           ['==', ['get', 'action'], 'delete'], '#ef4444',
           ['==', ['get', 'action'], 'new-piece'], '#ec4899',
@@ -403,13 +344,16 @@ export class TrackBuilderController {
 
   private addButton(icon: string, label: string, action: () => void, className = '', parent: HTMLElement = this.toolbar): HTMLButtonElement {
     const button = parent.createEl('button', { cls: `clickable-icon ${className}`.trim(), attr: { type: 'button', 'aria-label': label, title: label } });
+
     setIcon(button, icon);
     button.addEventListener('click', event => { event.stopPropagation(); action(); });
+
     return button;
   }
 
   private createLayerPicker(): void {
     const control = this.toolbar.createDiv({ cls: 'places-track-builder-layer-control' });
+
     this.layerPickerButton = this.addButton('layers-3', 'Choose selectable map layers', () => {
       this.setLayerPickerOpen(this.layerPicker?.hidden !== false);
     }, 'places-track-builder-layers', control);
@@ -437,17 +381,22 @@ export class TrackBuilderController {
     if (!this.layerPicker || !this.layerPickerButton) return;
     const mapTop = this.options.map.getContainer().getBoundingClientRect().top;
     const available = this.layerPickerButton.getBoundingClientRect().top - mapTop - LAYER_PICKER_EDGE_GAP;
+
     this.layerPicker.style.setProperty('--places-layer-picker-max-height', `${Math.max(LAYER_PICKER_MIN_HEIGHT, Math.round(available))}px`);
   }
 
   private discoverSelectableLayerGroups(): SelectableLayerGroup[] {
     const counts = new Map<string, number>();
+
     for (const feature of this.options.map.queryRenderedFeatures()) {
       if (feature.geometry.type !== 'LineString' && feature.geometry.type !== 'MultiLineString') continue;
       const id = feature.layer?.id;
+
       if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
     }
+
     const groups = new Map<string, { sourceLayer?: string; layers: { id: string; count: number }[] }>();
+
     for (const styleLayer of this.options.map.getStyle().layers ?? []) {
       if (styleLayer.type !== 'line' || styleLayer.id.startsWith('places-')) continue;
       const sourceLayer = 'source-layer' in styleLayer && typeof styleLayer['source-layer'] === 'string'
@@ -455,14 +404,17 @@ export class TrackBuilderController {
         : undefined;
       const key = sourceLayer ?? '';
       const group = groups.get(key) ?? { sourceLayer, layers: [] };
+
       group.layers.push({ id: styleLayer.id, count: counts.get(styleLayer.id) ?? 0 });
       groups.set(key, group);
     }
+
     return [...groups.values()]
       .map(group => ({ ...group, layers: group.layers.sort((a, b) => b.count - a.count || a.id.localeCompare(b.id)) }))
       .sort((a, b) => {
         const aCount = a.layers.reduce((sum, layer) => sum + layer.count, 0);
         const bCount = b.layers.reduce((sum, layer) => sum + layer.count, 0);
+
         return bCount - aCount || (a.sourceLayer ?? 'Other').localeCompare(b.sourceLayer ?? 'Other');
       });
   }
@@ -471,6 +423,7 @@ export class TrackBuilderController {
     if (!this.layerPicker) return;
     this.layerPicker.empty();
     const header = this.layerPicker.createDiv({ cls: 'places-track-builder-layer-picker-header' });
+
     header.createEl('strong', { text: 'Selectable layers' });
     header.createSpan({ text: 'Visible feature counts' });
     this.addButton(
@@ -481,12 +434,16 @@ export class TrackBuilderController {
       header,
     );
     const groups = this.discoverSelectableLayerGroups();
+
     if (groups.length === 0) {
       this.layerPicker.createDiv({ cls: 'places-track-builder-layer-empty', text: 'No selectable line layers are available in this style.' });
+
       return;
     }
+
     for (const group of groups) {
       const section = this.layerPicker.createDiv({ cls: 'places-track-builder-layer-group' });
+
       if (group.sourceLayer) {
         this.createLayerCheckbox(
           section,
@@ -499,7 +456,9 @@ export class TrackBuilderController {
       } else {
         section.createDiv({ cls: 'places-track-builder-layer-group-title', text: 'Rendered layers' });
       }
+
       const children = section.createDiv({ cls: 'places-track-builder-layer-children' });
+
       for (const layer of group.layers) {
         this.createLayerCheckbox(children, layer.id, layer.id, layer.count, false, group.layers.map(item => item.id), group.sourceLayer);
       }
@@ -510,17 +469,21 @@ export class TrackBuilderController {
   // number from when it rendered, and that number goes stale as soon as the
   // note is edited above it.
   private copySelectableLayersSetting(): void {
-    // An empty, never-customised set means "everything"; copy the expansion
+    // An empty, never-customized set means "everything"; copy the expansion
     // rather than an empty list.
     const selected = !this.layerSelectionCustomized && this.selectableLayers.size === 0
       ? this.discoverSelectableLayerGroups().flatMap(group => group.sourceLayer ? [group.sourceLayer] : group.layers.map(layer => layer.id))
       : [...this.selectableLayers];
+
     if (selected.length === 0) {
       new Notice('Select at least one layer to copy a setting.');
+
       return;
     }
+
     const quoted = selected.map(layer => (/^[A-Za-z0-9_-]+$/.test(layer) ? layer : `"${layer}"`));
     const setting = `selectableLayers: [${quoted.join(', ')}]`;
+
     void navigator.clipboard.writeText(setting).then(
       () => new Notice(`Copied: ${setting}`),
       () => new Notice('Could not copy the setting to the clipboard.'),
@@ -528,17 +491,10 @@ export class TrackBuilderController {
     logger.scope('TrackBuilder').debug('selectable layers copied', { draftKey: this.key, setting });
   }
 
-  private createLayerCheckbox(
-    parent: HTMLElement,
-    value: string,
-    label: string,
-    count: number,
-    group: boolean,
-    siblingLayerIds: readonly string[],
-    sourceLayer?: string,
-  ): void {
+  private createLayerCheckbox(parent: HTMLElement, value: string, label: string, count: number, group: boolean, siblingLayerIds: readonly string[], sourceLayer?: string): void {
     const row = parent.createEl('label', { cls: `places-track-builder-layer-row${group ? ' is-group' : ''}` });
     const input = row.createEl('input', { type: 'checkbox' });
+
     input.checked = (!this.layerSelectionCustomized && this.selectableLayers.size === 0)
       || this.selectableLayers.has(value)
       || (!group && sourceLayer !== undefined && this.selectableLayers.has(sourceLayer));
@@ -550,7 +506,9 @@ export class TrackBuilderController {
           discovered.layers.forEach(layer => this.selectableLayers.add(layer.id));
         }
       }
+
       this.layerSelectionCustomized = true;
+
       if (group) {
         if (input.checked) {
           siblingLayerIds.forEach(id => this.selectableLayers.delete(id));
@@ -562,9 +520,11 @@ export class TrackBuilderController {
         if (sourceLayer && this.selectableLayers.delete(sourceLayer)) {
           siblingLayerIds.filter(id => id !== value).forEach(id => this.selectableLayers.add(id));
         }
+
         if (input.checked) this.selectableLayers.add(value);
         else this.selectableLayers.delete(value);
       }
+
       this.adjacencyCandidateCache = undefined;
       this.candidate = undefined;
       this.candidateSelection = [];
@@ -581,6 +541,7 @@ export class TrackBuilderController {
 
   private createSelectionIntensityControl(parent: HTMLElement): void {
     const control = parent.createDiv({ cls: 'places-track-builder-selection-intensity', attr: { 'aria-label': 'Selection intensity' } });
+
     control.addEventListener('click', event => event.stopPropagation());
     control.createSpan({ cls: 'places-track-builder-selection-intensity-label', text: 'Selection' });
     const input = control.createEl('input', {
@@ -594,6 +555,7 @@ export class TrackBuilderController {
         'aria-label': 'Selection intensity',
       },
     });
+
     this.selectionIntensityOutput = control.createEl('output', { cls: 'places-track-builder-selection-intensity-output' });
     input.addEventListener('input', () => {
       this.selectionIntensity = Math.max(1, Math.min(5, Number(input.value))) as TrackBuilderSelectionIntensity;
@@ -607,6 +569,7 @@ export class TrackBuilderController {
 
   private updateSelectionIntensityOutput(): void {
     const label = trackBuilderSelectionProfile(this.selectionIntensity).label;
+
     if (this.selectionIntensityOutput) this.selectionIntensityOutput.value = label;
     if (this.active) this.status.setText(label);
   }
@@ -623,9 +586,10 @@ export class TrackBuilderController {
         max: String(Math.max(100, Math.ceil(this.snapRadiusMeters / 10) * 10)),
         step: '5',
         value: String(this.snapRadiusMeters),
-        'aria-label': 'Snap distance in metres',
+        'aria-label': 'Snap distance in meters',
       },
     });
+
     this.snapRadiusOutput = this.snapActions.createEl('output', { cls: 'places-track-builder-snap-radius-output' });
     radiusInput.addEventListener('input', () => {
       this.snapRadiusMeters = Number(radiusInput.value);
@@ -638,16 +602,18 @@ export class TrackBuilderController {
     this.snapTargetOutput = this.snapActions.createEl('output', { cls: 'places-track-builder-snap-target-output' });
     this.snapActions.createSpan({ cls: 'places-track-builder-snap-target-help', text: 'Click a nearby map path to prefer it' });
     const buttons = this.snapActions.createDiv({ cls: 'places-track-builder-snap-action-buttons' });
+
     this.snapWholeButton = this.addButton('maximize-2', 'Select the whole section', () => this.selectWholeSnapSection(), 'places-track-builder-snap-whole', buttons);
     this.addButton('scan-search', 'Find and select the largest recording gap', () => this.selectLargestRecordingGap(), 'places-track-builder-snap-gap', buttons);
     this.snapApplyButton = this.addButton('check', 'Apply the green snap preview', () => this.applySnapSelection(), 'places-track-builder-snap-apply', buttons);
-    this.addButton('x', 'Cancel snapping', () => this.setSnapping(false), 'places-track-builder-snap-cancel', buttons);
+    this.addButton('x', 'Cancel snapping', () => this.setMode('idle'), 'places-track-builder-snap-cancel', buttons);
     this.snapActions.hidden = true;
     this.updateSnapActionOutputs();
   }
 
   private updateSnapActionOutputs(): void {
     if (this.snapRadiusOutput) this.snapRadiusOutput.value = `${this.snapRadiusMeters} m`;
+
     if (this.snapTargetOutput) {
       const properties = this.snapPreferredCandidate?.sourceProperties;
       const target = this.snapPreferredCandidate?.name
@@ -655,171 +621,20 @@ export class TrackBuilderController {
         ?? (typeof properties?.class === 'string' ? properties.class : undefined)
         ?? (typeof properties?.subclass === 'string' ? properties.subclass : undefined)
         ?? 'Closest path';
+
       this.snapTargetOutput.value = target;
       this.snapTargetOutput.title = target;
     }
   }
 
-  private setActive(active: boolean): void {
-    this.active = active;
-    if (active) {
-      this.joining = false;
-      this.deleting = false;
-      this.direct = false;
-      this.snapping = false;
-      this.snapSelection = undefined;
-      this.clearSnapPreview();
-      this.directAnchor = undefined;
-      this.deleteSelections = [];
-      this.exitWaypointMode();
-    }
-    if (this.selectionIntensityControl) this.selectionIntensityControl.hidden = !active;
-    this.options.container.classList.toggle('places-track-builder-active', active || this.direct);
-    this.toolbar.querySelector('.places-track-builder-toggle')?.classList.toggle('is-active', active);
-    this.toolbar.querySelector('.places-track-builder-delete')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-direct')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-join')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-snap')?.classList.remove('is-active');
-    this.releaseStatusHold();
-    if (!active) {
-      this.candidate = undefined;
-      this.candidateSelection = [];
-      this.candidateStartsNewPiece = false;
-      this.candidatePoint = undefined;
-      this.setSourceData(HOVER_SOURCE, []);
-    }
-    this.render();
-  }
-
-  private setDeleting(deleting: boolean): void {
-    this.deleting = deleting;
-    this.deleteSelections = [];
-    if (deleting) {
-      this.joining = false;
-      this.active = false;
-      this.direct = false;
-      this.snapping = false;
-      this.snapSelection = undefined;
-      this.clearSnapPreview();
-      this.directAnchor = undefined;
-      this.exitWaypointMode();
-    }
-    this.options.container.classList.toggle('places-track-builder-active', deleting);
-    if (this.selectionIntensityControl) this.selectionIntensityControl.hidden = true;
-    this.toolbar.querySelector('.places-track-builder-delete')?.classList.toggle('is-active', deleting);
-    this.toolbar.querySelector('.places-track-builder-toggle')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-direct')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-join')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-snap')?.classList.remove('is-active');
-    this.candidate = undefined;
-    this.candidateSelection = [];
-    this.candidateStartsNewPiece = false;
-    this.candidatePoint = undefined;
-    this.releaseStatusHold();
-    this.setSourceData(HOVER_SOURCE, []);
-    this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
-    this.render();
-  }
-
-  private setDirect(direct: boolean): void {
-    this.joining = false;
-    this.direct = direct;
-    this.directAnchor = undefined;
-    this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
-    if (direct) {
-      this.active = false;
-      this.deleting = false;
-      this.snapping = false;
-      this.snapSelection = undefined;
-      this.clearSnapPreview();
-      this.deleteSelections = [];
-      this.exitWaypointMode();
-    }
-    this.options.container.classList.toggle('places-track-builder-active', direct || this.active || this.deleting);
-    if (this.selectionIntensityControl) this.selectionIntensityControl.hidden = true;
-    this.toolbar.querySelector('.places-track-builder-direct')?.classList.toggle('is-active', direct);
-    this.toolbar.querySelector('.places-track-builder-join')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-toggle')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-delete')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-snap')?.classList.remove('is-active');
-    this.candidate = undefined;
-    this.candidateSelection = [];
-    this.candidateStartsNewPiece = false;
-    this.candidatePoint = undefined;
-    this.releaseStatusHold();
-    this.setSourceData(HOVER_SOURCE, []);
-    this.render();
-  }
-
-  private setJoining(joining: boolean): void {
-    this.setDirect(joining);
-    this.joining = joining;
-    this.toolbar.querySelector('.places-track-builder-direct')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-join')?.classList.toggle('is-active', joining);
-    this.render();
-  }
-
-  private setSnapping(snapping: boolean): void {
-    this.snapping = snapping;
+  private setMode(mode: TrackBuilderMode): void {
+    this.mode = mode;
     this.snapSelection = undefined;
     this.clearSnapPreview();
-    if (snapping) {
-      this.joining = false;
-      this.active = false;
-      this.deleting = false;
-      this.direct = false;
-      this.directAnchor = undefined;
-      this.deleteSelections = [];
-      this.exitWaypointMode();
-    }
-    this.options.container.classList.toggle('places-track-builder-active', snapping);
-    if (this.selectionIntensityControl) this.selectionIntensityControl.hidden = true;
-    this.toolbar.querySelector('.places-track-builder-snap')?.classList.toggle('is-active', snapping);
-    this.toolbar.querySelector('.places-track-builder-toggle')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-delete')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-direct')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-join')?.classList.remove('is-active');
-    this.candidate = undefined;
-    this.candidateSelection = [];
-    this.candidateStartsNewPiece = false;
-    this.candidatePoint = undefined;
-    this.releaseStatusHold();
-    this.setSourceData(HOVER_SOURCE, []);
-    this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
-    this.render();
-  }
-
-  // Undoes only what waypoint mode owns; must not re-enter the other mode
-  // setters' shared reset.
-  private exitWaypointMode(): void {
-    this.waypointing = false;
+    this.directAnchor = undefined;
+    this.deleteSelections = [];
     this.selectedWaypointId = undefined;
-    this.toolbar.querySelector('.places-track-builder-waypoint')?.classList.remove('is-active');
     if (this.waypointActions) this.waypointActions.hidden = true;
-  }
-
-  private setWaypointing(waypointing: boolean): void {
-    this.waypointing = waypointing;
-    this.selectedWaypointId = undefined;
-    if (waypointing) {
-      this.joining = false;
-      this.active = false;
-      this.deleting = false;
-      this.direct = false;
-      this.snapping = false;
-      this.snapSelection = undefined;
-      this.clearSnapPreview();
-      this.directAnchor = undefined;
-      this.deleteSelections = [];
-    }
-    this.options.container.classList.toggle('places-track-builder-active', waypointing);
-    if (this.selectionIntensityControl) this.selectionIntensityControl.hidden = true;
-    this.toolbar.querySelector('.places-track-builder-waypoint')?.classList.toggle('is-active', waypointing);
-    this.toolbar.querySelector('.places-track-builder-toggle')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-delete')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-direct')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-join')?.classList.remove('is-active');
-    this.toolbar.querySelector('.places-track-builder-snap')?.classList.remove('is-active');
     this.candidate = undefined;
     this.candidateSelection = [];
     this.candidateStartsNewPiece = false;
@@ -827,11 +642,21 @@ export class TrackBuilderController {
     this.releaseStatusHold();
     this.setSourceData(HOVER_SOURCE, []);
     this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
+
+    this.options.container.classList.toggle('places-track-builder-active', mode !== 'idle');
+    if (this.selectionIntensityControl) this.selectionIntensityControl.hidden = !this.active;
+    const buttons = { build: 'toggle', delete: 'delete', direct: 'direct', join: 'join', snap: 'snap', waypoint: 'waypoint' };
+
+    for (const [buttonMode, suffix] of Object.entries(buttons)) {
+      this.toolbar.querySelector(`.places-track-builder-${suffix}`)?.classList.toggle('is-active', mode === buttonMode);
+    }
+
     this.render();
   }
 
   private selectedWaypoint(): TrackBuilderWaypoint | undefined {
     if (!this.selectedWaypointId) return undefined;
+
     return trackBuilderWaypoints(getTrackBuilderHistory(this.key).draft)
       .find(waypoint => waypoint.id === this.selectedWaypointId);
   }
@@ -843,6 +668,7 @@ export class TrackBuilderController {
       coordinate,
       name: `Waypoint ${existing.length + 1}`,
     };
+
     addTrackBuilderWaypoint(this.key, waypoint);
     this.selectedWaypointId = waypoint.id;
     logger.scope('TrackBuilder').debug('waypoint added', { draftKey: this.key, waypoint });
@@ -851,6 +677,7 @@ export class TrackBuilderController {
 
   private editSelectedWaypoint(): void {
     const waypoint = this.selectedWaypoint();
+
     if (!waypoint) return;
     new TrackBuilderWaypointModal(
       this.options.app,
@@ -866,6 +693,7 @@ export class TrackBuilderController {
 
   private deleteSelectedWaypoint(): void {
     const waypoint = this.selectedWaypoint();
+
     if (!waypoint) return;
     removeTrackBuilderWaypoint(this.key, waypoint.id);
     this.selectedWaypointId = undefined;
@@ -897,6 +725,7 @@ export class TrackBuilderController {
   private directSection(start: TrackBuilderCoordinate, end: TrackBuilderCoordinate, id?: string): TrackBuilderSection {
     const coordinates: TrackBuilderCoordinate[] = [start, end];
     const sectionId = id ?? `track-direct:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`;
+
     return {
       id: sectionId,
       sourceFeatureKey: sectionId,
@@ -914,6 +743,7 @@ export class TrackBuilderController {
     const anchors: DirectEndpointAnchor[] = [];
     const endpointRays = sections.flatMap(section => {
       if (section.coordinates.length < 2) return [];
+
       return [
         {
           coordinate: section.coordinates[0],
@@ -928,14 +758,18 @@ export class TrackBuilderController {
     const isGeometricLeaf = (coordinate: TrackBuilderCoordinate): boolean => {
       const origin = this.options.map.project(coordinate as [number, number]);
       const rays: TrackBuilderScreenPoint[] = endpointRays.flatMap(candidate => {
-        if (geographicDistanceMeters(coordinate, candidate.coordinate) > DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS) return [];
+        if (DistanceCalculator.haversineDistanceMeters(coordinate[1], coordinate[0], candidate.coordinate[1], candidate.coordinate[0]) > DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS) return [];
         const neighbor = this.options.map.project(candidate.neighbor as [number, number]);
+
         return [[neighbor.x - origin.x, neighbor.y - origin.y] as TrackBuilderScreenPoint];
       });
+
       return uniqueTrackBuilderRayCount(rays) <= 1;
     };
+
     for (let index = 0; index < sections.length; index++) {
       const section = sections[index];
+
       if (section.coordinates.length < 2) continue;
       const start = section.coordinates[0];
       const end = section.coordinates[section.coordinates.length - 1];
@@ -943,34 +777,45 @@ export class TrackBuilderController {
       const next = sections[index + 1];
       const startIsOpen = !previous
         || Boolean(section.breakBefore)
-        || geographicDistanceMeters(previous.coordinates[previous.coordinates.length - 1], start) > DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS;
+        || DistanceCalculator.haversineDistanceMeters(
+          previous.coordinates[previous.coordinates.length - 1][1], previous.coordinates[previous.coordinates.length - 1][0],
+          start[1], start[0],
+        ) > DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS;
       const endIsOpen = !next
         || Boolean(next.breakBefore)
-        || geographicDistanceMeters(end, next.coordinates[0]) > DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS;
+        || DistanceCalculator.haversineDistanceMeters(end[1], end[0], next.coordinates[0][1], next.coordinates[0][0]) > DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS;
+
       if (startIsOpen || isGeometricLeaf(start)) anchors.push({ id: `${section.id}:start`, sectionId: section.id, endpoint: 'start', coordinate: start });
       if (endIsOpen || isGeometricLeaf(end)) anchors.push({ id: `${section.id}:end`, sectionId: section.id, endpoint: 'end', coordinate: end });
 
       const projected = section.coordinates.map(coordinate => {
         const point = this.options.map.project(coordinate as [number, number]);
+
         return [point.x, point.y] as TrackBuilderScreenPoint;
       });
+
       for (let coordinateIndex = 1; coordinateIndex < projected.length - 1; coordinateIndex++) {
         if (!isTrackBuilderTurnaround(projected[coordinateIndex - 1], projected[coordinateIndex], projected[coordinateIndex + 1])) continue;
         const coordinate = section.coordinates[coordinateIndex];
-        if (anchors.some(anchor => geographicDistanceMeters(anchor.coordinate, coordinate) <= DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS)) continue;
+
+        if (anchors.some(anchor => DistanceCalculator.haversineDistanceMeters(anchor.coordinate[1], anchor.coordinate[0], coordinate[1], coordinate[0]) <= DIRECT_ENDPOINT_JOIN_TOLERANCE_METERS)) continue;
         anchors.push({ id: `${section.id}:turnaround:${coordinateIndex}`, coordinate });
       }
     }
+
     return anchors;
   }
 
   private findDirectEndpointAt(point: maplibregl.Point): DirectEndpointAnchor | undefined {
     let best: { anchor: DirectEndpointAnchor; distance: number } | undefined;
+
     for (const anchor of this.directEndpointAnchors()) {
       const projected = this.options.map.project(anchor.coordinate as [number, number]);
       const distance = Math.hypot(point.x - projected.x, point.y - projected.y);
+
       if (distance <= DIRECT_ENDPOINT_SNAP_DISTANCE_PIXELS && (!best || distance < best.distance)) best = { anchor, distance };
     }
+
     return best?.anchor;
   }
 
@@ -989,7 +834,8 @@ export class TrackBuilderController {
 
   private commitDirectLine(coordinate: TrackBuilderCoordinate, destination?: DirectEndpointAnchor): void {
     const anchor = this.directAnchor;
-    if (!anchor || geographicDistanceMeters(anchor.coordinate, coordinate) < 0.05) return;
+
+    if (!anchor || DistanceCalculator.haversineDistanceMeters(anchor.coordinate[1], anchor.coordinate[0], coordinate[1], coordinate[0]) < 0.05) return;
     const anchorReference: TrackBuilderSectionEndpoint | undefined = 'id' in anchor && anchor.sectionId && anchor.endpoint
       ? { sectionId: anchor.sectionId, endpoint: anchor.endpoint }
       : undefined;
@@ -1002,15 +848,15 @@ export class TrackBuilderController {
       : this.directSection(anchor.coordinate, coordinate);
     let insertAnchor = anchorReference;
     let insertDestination = destinationReference;
+
     if (!anchorReference && destinationReference) {
-      // Drawn from open ground onto an existing end: splice it at that end
-      // rather than appending a connector that touches nothing in list order.
       if (destinationReference.endpoint === 'end') section = reverseTrackBuilderSection(section);
       insertAnchor = destinationReference;
       insertDestination = undefined;
     } else if (!anchorReference && getTrackBuilderHistory(this.key).draft.sections.length > 0) {
       section = { ...section, breakBefore: true };
     }
+
     insertDirectTrackBuilderSection(this.key, section, insertAnchor, insertDestination);
     logger.scope('TrackBuilder').debug('direct line committed', {
       draftKey: this.key,
@@ -1033,42 +879,64 @@ export class TrackBuilderController {
     if (this.direct) {
       if (!this.directAnchor) {
         this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
+
         return;
       }
+
       const destination = this.findDirectEndpointAt(event.point);
+
       if (this.joining && !destination) {
         this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
+
         return;
       }
+
       const coordinate: TrackBuilderCoordinate = destination?.coordinate ?? [event.lngLat.lng, event.lngLat.lat];
-      if (geographicDistanceMeters(this.directAnchor.coordinate, coordinate) < 0.05) {
+
+      if (DistanceCalculator.haversineDistanceMeters(
+        this.directAnchor.coordinate[1], this.directAnchor.coordinate[0],
+        coordinate[1], coordinate[0],
+      ) < 0.05) {
         this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
+
         return;
       }
+
       this.setSourceData(DIRECT_PREVIEW_SOURCE, [this.directSection(this.directAnchor.coordinate, coordinate, 'preview')]);
+
       return;
     }
+
     if (this.waypointing) return;
+
     if (this.snapping) {
       if (this.snapSelection) return;
       const section = this.findDraftSectionAt(event.point);
       const previews = section
         ? [this.snapPreviewSection(section, this.localSelectionAtPoint(section, event.point))]
         : [];
+
       this.setSourceData(HOVER_SOURCE, previews, 'snap');
+
       return;
     }
+
     if (this.deleting) {
       const section = this.findDraftSectionAt(event.point);
       const selected = new Set(this.deleteSelections.map(selection => selection.sectionId));
       const previews = this.deletePreviewSections();
+
       if (section && !selected.has(section.id)) {
         const selection = this.localSelectionAtPoint(section, event.point);
+
         previews.push(this.deletePreviewSection(section, selection));
       }
+
       this.setSourceData(HOVER_SOURCE, previews, 'delete');
+
       return;
     }
+
     if (!this.active) return;
     this.candidate = this.findCandidateAt(event.point);
     this.candidatePoint = event.point;
@@ -1079,36 +947,43 @@ export class TrackBuilderController {
     if (this.direct) {
       event.preventDefault();
       const endpoint = this.findDirectEndpointAt(event.point);
+
       if (!this.directAnchor) {
-        // Joining needs two existing endpoints; drawing does not, and open
-        // ground starts a separate piece instead of being refused.
         if (endpoint) this.selectDirectAnchor(endpoint);
         else if (this.joining) this.status.setText('Join segments · choose a highlighted endpoint');
         else {
           this.directAnchor = { coordinate: [event.lngLat.lng, event.lngLat.lat] };
           this.render();
         }
+
         return;
       }
+
       if (this.joining && !endpoint) {
         this.status.setText('Join segments · choose another highlighted endpoint');
+
         return;
       }
+
       const coordinate: TrackBuilderCoordinate = endpoint?.coordinate ?? [event.lngLat.lng, event.lngLat.lat];
+
       this.commitDirectLine(coordinate, endpoint);
-      if (this.joining) this.setJoining(false);
+      if (this.joining) this.setMode('idle');
+
       return;
     }
+
     if (this.waypointing) {
       event.preventDefault();
-      // Marker clicks are handled on the marker element itself, and reaching the
-      // map means the pointer was on open ground: place a waypoint there.
       this.addWaypointAt([event.lngLat.lng, event.lngLat.lat]);
+
       return;
     }
+
     if (this.snapping) {
       if (this.snapSelection) {
         const preferred = this.findCandidateAt(event.point, undefined, 10);
+
         if (preferred) {
           event.preventDefault();
           this.snapPreferredCandidate = preferred;
@@ -1121,12 +996,16 @@ export class TrackBuilderController {
             selection: this.snapSelection,
             radiusMeters: this.snapRadiusMeters,
           });
+
           return;
         }
       }
+
       const section = this.findDraftSectionAt(event.point);
+
       if (!section) return;
       event.preventDefault();
+
       if (this.snapSelection?.sectionId === section.id) {
         logger.scope('TrackBuilder').debug('snap range deselected', {
           draftKey: this.key,
@@ -1138,6 +1017,7 @@ export class TrackBuilderController {
         this.clearSnapPreview();
       } else {
         const selected = this.localSelectionAtPoint(section, event.point);
+
         this.snapSelection = {
           ...selected,
           ranges: [{ start: selected.start, end: selected.end }],
@@ -1152,16 +1032,22 @@ export class TrackBuilderController {
           source: 'rendered-map',
         });
       }
+
       this.render();
+
       return;
     }
+
     if (this.deleting) {
       const section = this.findDraftSectionAt(event.point);
+
       if (!section) return;
       event.preventDefault();
       const existingIndex = this.deleteSelections.findIndex(selection => selection.sectionId === section.id);
+
       if (existingIndex >= 0) {
         const [selection] = this.deleteSelections.splice(existingIndex, 1);
+
         logger.scope('TrackBuilder').debug('delete range deselected', {
           draftKey: this.key,
           pointer: [event.lngLat.lng, event.lngLat.lat],
@@ -1170,9 +1056,12 @@ export class TrackBuilderController {
           selectedCount: this.deleteSelections.length,
         });
         this.render();
+
         return;
       }
+
       const selection = this.localSelectionAtPoint(section, event.point);
+
       this.deleteSelections.push(selection);
       logger.scope('TrackBuilder').debug('delete range selected', {
         draftKey: this.key,
@@ -1182,32 +1071,42 @@ export class TrackBuilderController {
         selectedCount: this.deleteSelections.length,
       });
       this.render();
+
       return;
     }
+
     if (!this.active) return;
     const candidate = this.candidate ?? this.findCandidateAt(event.point);
+
     if (!candidate) return;
     event.preventDefault();
     const selection = this.candidate === candidate && this.candidateSelection.length > 0
       ? this.candidateSelection
       : this.selectionForCandidate(candidate, event.point);
+
     if (selection.length > 1) {
       this.commitAddedSelection(selection, event);
       this.render();
+
       return;
     }
+
     const section = selection[0] ?? this.sectionBetween(candidate, { segmentIndex: 0, t: 0 }, { segmentIndex: candidate.coordinates.length - 2, t: 1 });
     const clipped = this.clipAddedSectionAgainstDraft(section, event.point);
+
     if (!clipped) {
       logger.scope('TrackBuilder').debug('feature click ignored because it is already covered by the draft', {
         draftKey: this.key,
         pointer: [event.lngLat.lng, event.lngLat.lat],
         candidate: sectionLogData(candidate),
       });
+
       return;
     }
+
     const oriented = this.orientAddedSection(clipped);
     const committed = oriented.section;
+
     logger.scope('TrackBuilder').debug('feature clicked', {
       draftKey: this.key,
       pointer: [event.lngLat.lng, event.lngLat.lat],
@@ -1219,12 +1118,7 @@ export class TrackBuilderController {
     this.render();
   }
 
-  private findCandidateAt(
-    point: maplibregl.Point,
-    preferred?: TrackBuilderSection,
-    maximumDistance = Number.POSITIVE_INFINITY,
-    candidateIndex?: SnapCandidateIndex,
-  ): TrackBuilderSection | undefined {
+  private findCandidateAt(point: maplibregl.Point, preferred?: TrackBuilderSection, maximumDistance = Number.POSITIVE_INFINITY, candidateIndex?: SnapCandidateIndex): TrackBuilderSection | undefined {
     const tolerance = 10;
     const indexed = candidateIndex
       ? trackBuilderCandidatesAt(candidateIndex, [point.x, point.y])
@@ -1235,45 +1129,57 @@ export class TrackBuilderController {
         [point.x + tolerance, point.y + tolerance],
       ]));
     let closest: { section: TrackBuilderSection; distance: number } | undefined;
+
     for (const section of candidates) {
       const projected = indexed?.find(candidate => candidate.candidate.id === section.id);
       const distance = projected
         ? closestTrackBuilderProjectedPosition([point.x, point.y], projected.points).distance
         : this.screenDistance(point, section.coordinates);
+
       this.candidateDistances.set(section.id, distance);
       if (!closest || distance < closest.distance) closest = { section, distance };
     }
+
     if (preferred) {
       const indexedPreferred = indexed?.find(candidate => candidate.candidate.id === preferred.id);
       const preferredDistance = indexedPreferred
         ? closestTrackBuilderProjectedPosition([point.x, point.y], indexedPreferred.points).distance
         : this.screenDistance(point, preferred.sourceCoordinates ?? preferred.coordinates);
+
       if (shouldKeepPreferredTrackCandidate(preferredDistance, closest?.distance ?? Number.POSITIVE_INFINITY, maximumDistance)) {
         this.candidateDistances.set(preferred.id, preferredDistance);
+
         return preferred;
       }
     }
+
     return closest && closest.distance <= maximumDistance ? closest.section : undefined;
   }
 
   private candidateSections(features: readonly maplibregl.MapGeoJSONFeature[]): TrackBuilderSection[] {
     const sections = new Map<string, TrackBuilderSection>();
+
     for (const feature of features) {
       const layerId = feature.layer?.id ?? '';
+
       if (layerId.startsWith('places-') || layerId.startsWith('track-') || layerId.startsWith('geojson-') || layerId.startsWith('heatmap')) continue;
       if (layerId.includes('casing')) continue;
       if (!this.matchesSelectableFeature(layerId, feature.sourceLayer)) continue;
       if (feature.geometry.type !== 'LineString' && feature.geometry.type !== 'MultiLineString') continue;
       const lines = feature.geometry.type === 'LineString' ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+
       for (const rawCoordinates of lines) {
         const coordinates = rawCoordinates.filter(coordinate => coordinate.length >= 2).map(coordinate => [coordinate[0], coordinate[1]] as TrackBuilderCoordinate);
+
         if (coordinates.length < 2) continue;
         const layerId = feature.layer?.id ?? '';
         const id = hashString36(JSON.stringify([feature.source, feature.sourceLayer, feature.id, coordinates]));
         const section: TrackBuilderSection = { id, coordinates, sourceCoordinates: coordinates, layerId, sourceLayer: feature.sourceLayer, featureId: feature.id, name: feature.properties?.name as string | undefined, sourceProperties: feature.properties };
+
         sections.set(id, section);
       }
     }
+
     return [...sections.values()];
   }
 
@@ -1286,46 +1192,53 @@ export class TrackBuilderController {
       // provider-specific road/path layer IDs.
       const normalizedLayer = layerId.toLowerCase();
       const normalizedSource = sourceLayer?.toLowerCase() ?? '';
+
       return normalizedSource === 'transportation'
         || normalizedSource === 'road'
         || normalizedLayer.includes('road')
         || normalizedLayer.includes('path')
         || normalizedLayer.includes('trail');
     }
+
     if (!this.layerSelectionCustomized && this.selectableLayers.size === 0) return true;
+
     return this.selectableLayers.has(layerId) || this.selectableLayers.has(sourceLayer ?? '');
   }
 
   private refreshCandidateSelection(): void {
     if (!this.active || !this.candidate || !this.candidatePoint) {
       const wasStartingNewPiece = this.candidateStartsNewPiece;
+
       this.candidateSelection = [];
       this.candidateStartsNewPiece = false;
       this.setSourceData(HOVER_SOURCE, []);
       // Pointing away from every feature has to retire the "not connected"
       // label, which nothing else would repaint until the next render.
       if (wasStartingNewPiece) this.updateStatus();
+
       return;
     }
+
     this.candidateSelection = this.selectionForCandidate(this.candidate, this.candidatePoint);
     this.candidateStartsNewPiece = this.selectionStartsNewPiece(this.candidateSelection);
     this.setSourceData(HOVER_SOURCE, this.candidateSelection, this.candidateStartsNewPiece ? 'new-piece' : undefined);
     this.updateStatus();
   }
 
-  // The points a newly added feature may attach to: the two open ends of the
-  // route, plus both sides of any interior gap, which `commitAddedSection` can
-  // fill by splicing between the adjacent pair.
   private routeAttachmentAnchors(): TrackBuilderCoordinate[] {
     const sections = getTrackBuilderHistory(this.key).draft.sections;
+
     if (sections.length === 0) return [];
     const lastCoordinate = (section: TrackBuilderSection) => section.coordinates[section.coordinates.length - 1];
     const anchors: TrackBuilderCoordinate[] = [sections[0].coordinates[0], lastCoordinate(sections[sections.length - 1])];
+
     for (let index = 0; index + 1 < sections.length; index++) {
       const leftEnd = lastCoordinate(sections[index]);
       const rightStart = sections[index + 1].coordinates[0];
-      if (geographicDistanceMeters(leftEnd, rightStart) > CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS) anchors.push(leftEnd, rightStart);
+
+      if (DistanceCalculator.haversineDistanceMeters(leftEnd[1], leftEnd[0], rightStart[1], rightStart[0]) > CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS) anchors.push(leftEnd, rightStart);
     }
+
     return anchors;
   }
 
@@ -1337,7 +1250,9 @@ export class TrackBuilderController {
   // held message after the click covers the remainder.
   private selectionStartsNewPiece(selection: readonly TrackBuilderSection[]): boolean {
     const anchors = this.routeAttachmentAnchors();
+
     if (anchors.length === 0 || selection.length === 0) return false;
+
     return !anchors.some(anchor => selection.some(section =>
       this.coordinateLineConnection(anchor, section.coordinates).geographicDistanceMeters <= TRACK_BRIDGE_MAX_DISTANCE_METERS));
   }
@@ -1345,6 +1260,7 @@ export class TrackBuilderController {
   private projectedSelectionPoints(section: TrackBuilderSection): TrackBuilderSelectionPoint[] {
     return (section.sourceCoordinates ?? section.coordinates).map(coordinate => {
       const point = this.options.map.project(coordinate as [number, number]);
+
       return [point.x, point.y];
     });
   }
@@ -1352,13 +1268,18 @@ export class TrackBuilderController {
   private selectionForCandidate(candidate: TrackBuilderSection, point: maplibregl.Point): TrackBuilderSection[] {
     const coordinates = candidate.sourceCoordinates ?? candidate.coordinates;
     const profile = trackBuilderSelectionProfile(this.selectionIntensity);
+
     if (profile.localHalfLengthPixels !== undefined) {
       const center = this.positionOnLine(point, coordinates);
       const range = localSelectionRange(this.projectedSelectionPoints(candidate), center, profile.localHalfLengthPixels);
+
       return [this.sectionBetween(candidate, range.start, range.end)];
     }
+
     const whole = this.sectionBetween(candidate, { segmentIndex: 0, t: 0 }, { segmentIndex: coordinates.length - 2, t: 1 });
+
     if (profile.adjacentHops === 0) return [whole];
+
     return this.expandAdjacentSelection(whole, profile.adjacentHops);
   }
 
@@ -1372,31 +1293,34 @@ export class TrackBuilderController {
       this.options.map.getPitch().toFixed(2),
     ].join(':');
     const now = Date.now();
+
     if (this.adjacencyCandidateCache?.signature === signature && this.adjacencyCandidateCache.expiresAt > now) {
       return this.adjacencyCandidateCache.sections;
     }
+
     const sections = this.candidateSections(this.options.map.queryRenderedFeatures());
+
     this.adjacencyCandidateCache = { signature, expiresAt: now + 750, sections };
+
     return sections;
   }
 
   private inwardSelectionReference(section: TrackBuilderSection, endpoint: 'start' | 'end'): TrackBuilderSelectionPoint {
     const points = section.coordinates.map(coordinate => {
       const point = this.options.map.project(coordinate as [number, number]);
+
       return [point.x, point.y] as TrackBuilderSelectionPoint;
     });
     const anchor = endpoint === 'start' ? points[0] : points[points.length - 1];
     const indexes = endpoint === 'start'
       ? Array.from({ length: points.length - 1 }, (_, index) => index + 1)
       : Array.from({ length: points.length - 1 }, (_, index) => points.length - 2 - index);
+
     return indexes.map(index => points[index]).find(point => Math.hypot(point[0] - anchor[0], point[1] - anchor[1]) >= 4)
       ?? points[endpoint === 'start' ? Math.min(1, points.length - 1) : Math.max(0, points.length - 2)];
   }
 
-  private continuationCandidates(
-    sections: readonly TrackBuilderSection[],
-    excluded: ReadonlySet<string>,
-  ): TrackBuilderContinuationCandidate<TrackBuilderSection>[] {
+  private continuationCandidates(sections: readonly TrackBuilderSection[], excluded: ReadonlySet<string>): TrackBuilderContinuationCandidate<TrackBuilderSection>[] {
     return sections
       .filter(section => !excluded.has(section.id))
       .map(section => ({ key: section.id, value: section, points: this.projectedSelectionPoints(section) }));
@@ -1406,6 +1330,7 @@ export class TrackBuilderController {
     const chain = [seed];
     const candidates = this.adjacencyCandidates();
     const used = new Set([seed.sourceFeatureKey ?? seed.id, seed.id]);
+
     for (let hop = 0; hop < hops; hop++) {
       const leftSection = chain[0];
       const leftAnchor = leftSection.coordinates[0];
@@ -1415,10 +1340,12 @@ export class TrackBuilderController {
         this.inwardSelectionReference(leftSection, 'start'),
         this.continuationCandidates(candidates, used),
       );
+
       if (left) {
         used.add(left.candidate.key);
         const added = this.sectionBetween(left.candidate.value, left.outer, left.connection);
         const coordinates = [...added.coordinates];
+
         coordinates[coordinates.length - 1] = leftAnchor;
         chain.unshift({ ...added, coordinates, endCoordinateOverride: leftAnchor, breakBefore: false });
       }
@@ -1431,23 +1358,29 @@ export class TrackBuilderController {
         this.inwardSelectionReference(rightSection, 'end'),
         this.continuationCandidates(candidates, used),
       );
+
       if (right) {
         used.add(right.candidate.key);
         const added = this.sectionBetween(right.candidate.value, right.connection, right.outer);
         const coordinates = [...added.coordinates];
+
         coordinates[0] = rightAnchor;
         chain.push({ ...added, coordinates, startCoordinateOverride: rightAnchor, breakBefore: false });
       }
+
       if (!left && !right) break;
     }
+
     return chain;
   }
 
   private commitAddedSelection(selection: readonly TrackBuilderSection[], event: maplibregl.MapMouseEvent): void {
     let additions = selection.flatMap(section => {
       const clipped = this.clipAddedSectionAgainstDraft(section);
+
       return clipped ? [clipped] : [];
     });
+
     if (additions.length === 0) {
       logger.scope('TrackBuilder').debug('expanded feature selection ignored because it is already covered by the draft', {
         draftKey: this.key,
@@ -1455,17 +1388,20 @@ export class TrackBuilderController {
         intensity: this.selectionIntensity,
         candidates: selection.map(sectionLogData),
       });
+
       return;
     }
 
     const existing = getTrackBuilderHistory(this.key).draft.sections;
     const previousCoordinates = existing[existing.length - 1]?.coordinates;
     const previousEnd = previousCoordinates?.[previousCoordinates.length - 1];
+
     if (previousEnd) {
       const firstStart = additions[0].section.coordinates[0];
       const lastCoordinates = additions[additions.length - 1].section.coordinates;
       const lastEnd = lastCoordinates[lastCoordinates.length - 1];
-      if (geographicDistanceMeters(previousEnd, lastEnd) < geographicDistanceMeters(previousEnd, firstStart)) {
+
+      if (DistanceCalculator.haversineDistanceMeters(previousEnd[1], previousEnd[0], lastEnd[1], lastEnd[0]) < DistanceCalculator.haversineDistanceMeters(previousEnd[1], previousEnd[0], firstStart[1], firstStart[0])) {
         additions = additions.reverse().map(added => ({
           section: reverseTrackBuilderSection(added.section),
           startContact: added.endContact,
@@ -1478,27 +1414,35 @@ export class TrackBuilderController {
     const last = additions[additions.length - 1];
     const startIndex = first.startContact ? existing.findIndex(section => section.id === first.startContact!.section.id) : -1;
     const endIndex = last.endContact ? existing.findIndex(section => section.id === last.endContact!.section.id) : -1;
-    const startsAtLeftEnd = startIndex >= 0 && geographicDistanceMeters(
-      first.startContact!.coordinate,
-      existing[startIndex].coordinates[existing[startIndex].coordinates.length - 1],
+    const startsAtLeftEnd = startIndex >= 0 && DistanceCalculator.haversineDistanceMeters(
+      first.startContact!.coordinate[1], first.startContact!.coordinate[0],
+      existing[startIndex].coordinates[existing[startIndex].coordinates.length - 1][1], existing[startIndex].coordinates[existing[startIndex].coordinates.length - 1][0],
     ) <= 1;
-    const endsAtRightStart = endIndex >= 0 && geographicDistanceMeters(
-      last.endContact!.coordinate,
-      existing[endIndex].coordinates[0],
+    const endsAtRightStart = endIndex >= 0 && DistanceCalculator.haversineDistanceMeters(
+      last.endContact!.coordinate[1], last.endContact!.coordinate[0],
+      existing[endIndex].coordinates[0][1], existing[endIndex].coordinates[0][0],
     ) <= 1;
     const committed = additions.map((added, index) => ({ ...added.section, breakBefore: index === 0 ? added.section.breakBefore : false }));
+
     if (startsAtLeftEnd && endsAtRightStart && endIndex === startIndex + 1) {
       const next = [...existing];
+
       next.splice(endIndex, 0, ...committed.map(section => ({ ...section, breakBefore: false })));
       next[endIndex + committed.length] = { ...next[endIndex + committed.length], breakBefore: false };
       replaceTrackBuilderSections(this.key, next);
     } else {
-      if (previousEnd && geographicDistanceMeters(previousEnd, committed[0].coordinates[0]) > CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS) {
+      if (previousEnd && DistanceCalculator.haversineDistanceMeters(
+        previousEnd[1], previousEnd[0],
+        committed[0].coordinates[0][1], committed[0].coordinates[0][0],
+      ) > CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS) {
         this.startNewPiece(committed, 'selection');
+
         return;
       }
+
       appendTrackBuilderSections(this.key, committed);
     }
+
     logger.scope('TrackBuilder').debug('expanded feature selection committed', {
       draftKey: this.key,
       pointer: [event.lngLat.lng, event.lngLat.lat],
@@ -1510,6 +1454,7 @@ export class TrackBuilderController {
   private findDraftSectionAt(point: maplibregl.Point): TrackBuilderSection | undefined {
     const features = this.options.map.queryRenderedFeatures(point, { layers: [DRAFT_LAYER] });
     const id: unknown = features[0]?.properties?.id;
+
     return typeof id === 'string'
       ? getTrackBuilderHistory(this.key).draft.sections.find(section => section.id === id)
       : undefined;
@@ -1517,6 +1462,7 @@ export class TrackBuilderController {
 
   private screenDistance(point: maplibregl.Point, coordinates: readonly TrackBuilderCoordinate[]): number {
     let minimum = Number.POSITIVE_INFINITY;
+
     for (let index = 1; index < coordinates.length; index++) {
       const a = this.options.map.project(coordinates[index - 1] as [number, number]);
       const b = this.options.map.project(coordinates[index] as [number, number]);
@@ -1524,27 +1470,35 @@ export class TrackBuilderController {
       const dy = b.y - a.y;
       const denominator = dx * dx + dy * dy;
       const t = denominator === 0 ? 0 : Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / denominator));
+
       minimum = Math.min(minimum, Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy)));
     }
+
     return minimum;
   }
 
   private render(): void {
     const history = getTrackBuilderHistory(this.key);
     const sectionIds = new Set(history.draft.sections.map(section => section.id));
+
     if (this.directAnchor && 'sectionId' in this.directAnchor && (this.directAnchor.sectionId === undefined || !sectionIds.has(this.directAnchor.sectionId))) {
       this.directAnchor = undefined;
       this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
     }
+
     this.deleteSelections = this.deleteSelections.filter(selection => sectionIds.has(selection.sectionId));
+
     if (this.snapSelection && !sectionIds.has(this.snapSelection.sectionId)) {
       this.snapSelection = undefined;
       this.clearSnapPreview();
     }
+
     const waypoints = trackBuilderWaypoints(history.draft);
+
     if (this.selectedWaypointId && !waypoints.some(waypoint => waypoint.id === this.selectedWaypointId)) {
       this.selectedWaypointId = undefined;
     }
+
     this.setSourceData(DRAFT_SOURCE, history.draft.sections);
     this.renderHandleMarkers(history.draft.sections);
     this.renderWaypointMarkers(waypoints);
@@ -1553,12 +1507,14 @@ export class TrackBuilderController {
     this.updateSnapPreview();
     if (this.deleteActions) this.deleteActions.hidden = this.deleteSelections.length === 0;
     if (this.snapActions) this.snapActions.hidden = !this.snapping;
+
     if (this.snapApplyButton) {
       this.snapApplyButton.disabled = !this.snapPreview;
       this.snapApplyButton.title = this.snapPreview
         ? 'Apply the green snap preview'
         : this.snapPreviewError ?? 'A connected preview is required before this can be applied.';
     }
+
     if (this.snapWholeButton) this.snapWholeButton.disabled = !this.snapSelection;
     this.updateStatus();
   }
@@ -1569,9 +1525,11 @@ export class TrackBuilderController {
   private updateStatus(): void {
     if (this.statusHoldUntil > Date.now()) return;
     const history = getTrackBuilderHistory(this.key);
+
     if (this.waypointing) {
       const waypoints = trackBuilderWaypoints(history.draft);
       const selected = this.selectedWaypoint();
+
       this.status.setText(selected
         ? `Waypoint · ${selected.name ?? 'unnamed'}`
         : `Waypoints · ${waypoints.length} placed`);
@@ -1588,8 +1546,10 @@ export class TrackBuilderController {
       // needs the segment count.
       const summary = () => {
         const segmentCount = trackBuilderSegments(history.draft).length;
+
         return `${history.draft.sections.length} section${history.draft.sections.length === 1 ? '' : 's'} · ${segmentCount} segment${segmentCount === 1 ? '' : 's'}`;
       };
+
       this.status.setText(this.direct
       ? this.joining
         ? this.directAnchor
@@ -1625,6 +1585,7 @@ export class TrackBuilderController {
   // piece that happens to start near the route's end still stays separate.
   private startNewPiece(sections: readonly TrackBuilderSection[], kind: 'feature' | 'selection'): void {
     const pieces = [{ ...sections[0], breakBefore: true }, ...sections.slice(1)];
+
     appendTrackBuilderSections(this.key, pieces);
     logger.scope('TrackBuilder').debug('new piece started', {
       draftKey: this.key,
@@ -1656,6 +1617,7 @@ export class TrackBuilderController {
       window.clearTimeout(this.statusHoldTimer);
       this.statusHoldTimer = undefined;
     }
+
     if (this.statusHoldUntil === 0) return;
     this.statusHoldUntil = 0;
     this.status.classList.remove('is-held');
@@ -1664,17 +1626,23 @@ export class TrackBuilderController {
 
   private updateSnapStatus(): void {
     if (!this.snapping) return;
+
     if (!this.snapSelection) {
       this.status.setText('Snap GPX · click a section');
       this.status.title = 'Click a loaded GPX section to select a local range. Snapping follows visible map line features and does not call a routing or map-matching API.';
+
       return;
     }
+
     if (!this.snapPreview) {
       this.status.setText(this.snapPreviewError ? 'Preview unavailable' : 'No snap preview');
       this.status.title = this.snapPreviewError ?? 'No connected selectable map path was found within the chosen distance.';
+
       return;
     }
+
     const count = this.snapPreview.mappedSections.length;
+
     this.status.setText(`Preview · ${count} feature${count === 1 ? '' : 's'}`);
     this.status.title = this.snapPreferredCandidate
       ? 'The green line is the proposed snap. Click another nearby road or trail to prefer it, adjust the cyan boundaries or distance, then apply.'
@@ -1684,16 +1652,21 @@ export class TrackBuilderController {
   private updateDeletePreview(): void {
     if (!this.deleting || this.deleteSelections.length === 0) {
       if (this.deleting) this.setSourceData(HOVER_SOURCE, []);
+
       return;
     }
+
     this.setSourceData(HOVER_SOURCE, this.deletePreviewSections(), 'delete');
   }
 
   private deletePreviewSections(): TrackBuilderSection[] {
     const sections = getTrackBuilderHistory(this.key).draft.sections;
+
     return this.deleteSelections.flatMap(selection => {
       const section = sections.find(candidate => candidate.id === selection.sectionId);
+
       if (!section) return [];
+
       return [this.deletePreviewSection(section, selection)];
     });
   }
@@ -1702,18 +1675,23 @@ export class TrackBuilderController {
     const sourceCoordinates = section.sourceCoordinates ?? section.coordinates;
     const center = this.clampPositionToSection(this.positionOnLine(point, sourceCoordinates), section);
     const range = this.centeredSelectionRange(section, center);
+
     return { sectionId: section.id, start: range.start, end: range.end };
   }
 
   private selectWholeDeleteSections(): void {
     const sections = getTrackBuilderHistory(this.key).draft.sections;
+
     for (const selection of this.deleteSelections) {
       const section = sections.find(candidate => candidate.id === selection.sectionId);
+
       if (!section) continue;
       const range = wholeTrackBuilderSectionRange(section);
+
       selection.start = range.start;
       selection.end = range.end;
     }
+
     logger.scope('TrackBuilder').debug('delete selections expanded to whole sections', {
       draftKey: this.key,
       selections: this.deleteSelections,
@@ -1723,11 +1701,13 @@ export class TrackBuilderController {
 
   private deletePreviewSection(section: TrackBuilderSection, selection: DeleteSelection): TrackBuilderSection {
     const preview = this.sectionBetween(section, selection.start, selection.end);
+
     return { ...preview, id: `delete:${section.id}` };
   }
 
   private snapPreviewSection(section: TrackBuilderSection, selection: TrackBuilderRange, index = 0): TrackBuilderSection {
     const preview = this.sectionBetween(section, selection.start, selection.end);
+
     return { ...preview, id: `snap:${section.id}:${index}` };
   }
 
@@ -1743,12 +1723,16 @@ export class TrackBuilderController {
         this.setSourceData(HOVER_SOURCE, []);
         this.setSourceData(SNAP_PREVIEW_SOURCE, []);
       }
+
       return;
     }
+
     const section = getTrackBuilderHistory(this.key).draft.sections.find(candidate => candidate.id === this.snapSelection?.sectionId);
+
     if (section) this.normalizeSnapSelection(section, this.snapSelection);
     this.setSourceData(HOVER_SOURCE, section ? this.snapPreviewSections(section, this.snapSelection) : [], 'snap');
     const startedAt = performance.now();
+
     try {
       this.snapPreview = section ? this.createSnapPreview(section, this.snapSelection) : undefined;
       this.snapPreviewError = undefined;
@@ -1758,12 +1742,14 @@ export class TrackBuilderController {
       this.snapPreviewError = getErrorMessage(error);
       this.setSourceData(SNAP_PREVIEW_SOURCE, []);
     }
+
     if (this.snapApplyButton) {
       this.snapApplyButton.disabled = !this.snapPreview;
       this.snapApplyButton.title = this.snapPreview
         ? 'Apply the green snap preview'
         : this.snapPreviewError ?? 'A connected preview is required before this can be applied.';
     }
+
     this.updateSnapStatus();
     logger.scope('TrackBuilder').debug('snap preview updated', {
       draftKey: this.key,
@@ -1785,6 +1771,7 @@ export class TrackBuilderController {
   private updateSnapSelectionDisplay(message?: string): void {
     if (!this.snapping || !this.snapSelection) return;
     const section = getTrackBuilderHistory(this.key).draft.sections.find(candidate => candidate.id === this.snapSelection?.sectionId);
+
     this.snapPreview = undefined;
     this.snapPreviewError = message;
     this.setSourceData(HOVER_SOURCE, section ? this.snapPreviewSections(section, this.snapSelection) : [], 'snap');
@@ -1800,6 +1787,7 @@ export class TrackBuilderController {
         end: this.clampPositionToSection(range.end, section),
       }))
       .filter(range => !positionsEqual(range.start, range.end));
+
     if (ranges.length === 0) return;
     selection.ranges = ranges;
     const source = section.sourceCoordinates ?? section.coordinates;
@@ -1807,6 +1795,7 @@ export class TrackBuilderController {
     const sectionEnd = section.endPosition ?? { segmentIndex: source.length - 2, t: 1 };
     const first = ranges[0];
     const last = ranges[ranges.length - 1];
+
     if (comparePositions(sectionStart, sectionEnd) <= 0) {
       selection.start = first.start;
       selection.end = last.end;
@@ -1819,8 +1808,10 @@ export class TrackBuilderController {
   private selectWholeSnapSection(): void {
     if (!this.snapSelection) return;
     const section = getTrackBuilderHistory(this.key).draft.sections.find(candidate => candidate.id === this.snapSelection?.sectionId);
+
     if (!section) return;
     const source = section.sourceCoordinates ?? section.coordinates;
+
     this.snapSelection = {
       sectionId: section.id,
       start: section.startPosition ?? { segmentIndex: 0, t: 0 },
@@ -1837,12 +1828,14 @@ export class TrackBuilderController {
     const candidates = getTrackBuilderHistory(this.key).draft.sections.flatMap(section =>
       findTrackBuilderRecordingGaps(section).map(gap => ({ section, gap })));
     const selected = candidates.sort((left, right) => right.gap.elapsedSeconds - left.gap.elapsedSeconds)[0];
+
     if (!selected) {
       this.status.setText('No timed recording gap found');
-      this.status.title = 'A repairable gap needs timestamps at both ends, at least 60 seconds elapsed, and at least 100 metres between recorded points.';
+      this.status.title = 'A repairable gap needs timestamps at both ends, at least 60 seconds elapsed, and at least 100 meters between recorded points.';
+
       return;
     }
-    this.snapping = true;
+
     this.snapSelection = {
       sectionId: selected.section.id,
       start: selected.gap.start,
@@ -1857,9 +1850,12 @@ export class TrackBuilderController {
 
   private applySnapSelection(): void {
     const selection = this.snapSelection;
+
     if (!selection) return;
     const section = getTrackBuilderHistory(this.key).draft.sections.find(candidate => candidate.id === selection.sectionId);
+
     if (!section) return;
+
     try {
       const preview = this.snapPreview ?? this.createSnapPreview(section, selection);
       const currentSections = getTrackBuilderHistory(this.key).draft.sections;
@@ -1868,9 +1864,11 @@ export class TrackBuilderController {
         section.id,
         preview.replacements,
       );
+
       if (next.length === currentSections.length && next.every((candidate, index) => candidate === currentSections[index])) {
         throw new Error('The selected track range could not be replaced.');
       }
+
       replaceTrackBuilderSections(this.key, next);
       logger.scope('TrackBuilder').debug('snap range committed', {
         draftKey: this.key,
@@ -1883,10 +1881,11 @@ export class TrackBuilderController {
         matchedSampleCount: preview.matchedSampleCount,
         mappedSections: preview.mappedSections.map(sectionLogData),
       });
-      this.setSnapping(false);
+      this.setMode('idle');
       this.status.setText(`Snapped to ${preview.mappedSections.length} visible map feature${preview.mappedSections.length === 1 ? '' : 's'}`);
     } catch (error) {
       const message = getErrorMessage(error);
+
       logger.scope('TrackBuilder').error('snap range failed', {
         draftKey: this.key,
         sectionId: section.id,
@@ -1901,11 +1900,14 @@ export class TrackBuilderController {
 
   private createSnapPreview(section: TrackBuilderSection, selection: SnapSelection): SnapPreview {
     const ranges = selection.ranges.filter(range => !positionsEqual(range.start, range.end));
+
     if (ranges.length === 0) throw new Error('Drag a boundary to select a non-empty track range.');
     const replacements = ranges.map(range => this.createSnapRangePreview(section, range));
+
     if (this.snapPreferredCandidate && !replacements.some(replacement => replacement.matchedPreferredCandidate)) {
       throw new Error('The chosen path does not cover this selection within the current snap distance. Increase the distance or choose another path.');
     }
+
     return {
       inputPointCount: replacements.reduce((sum, replacement) => sum + replacement.inputPointCount, 0),
       sampleCount: replacements.reduce((sum, replacement) => sum + replacement.sampleCount, 0),
@@ -1931,6 +1933,7 @@ export class TrackBuilderController {
     const coordinates = sliceLine(source, selectedStart, selectedEnd);
     const projected = coordinates.map(coordinate => {
       const point = this.options.map.project(coordinate as [number, number]);
+
       return { x: point.x, y: point.y };
     });
     const radiusPixels = this.mapSnapRadiusPixels(projected[Math.floor(projected.length / 2)]);
@@ -1947,9 +1950,12 @@ export class TrackBuilderController {
       (left, right) => {
         const key = left.id < right.id ? `${left.id}:${right.id}` : `${right.id}:${left.id}`;
         const cached = connectivity.get(key);
+
         if (cached !== undefined) return cached;
         const connected = this.resolveSectionConnection(left, right).connected;
+
         connectivity.set(key, connected);
+
         return connected;
       },
       sampleSpacingPixels,
@@ -1967,14 +1973,18 @@ export class TrackBuilderController {
     const graphRuns = !traceFullyCovered
       ? this.routeVisibleSnapNetwork(coordinates[0], coordinates[coordinates.length - 1], radiusPixels)
       : undefined;
+
     if (!traceFullyCovered && !graphRuns) {
       throw new Error('No connected visible road or trail joins the selected endpoints. Keep the complete path on screen, increase the distance, or choose additional selectable layers.');
     }
+
     const sectionBuildStartedAt = performance.now();
     const runs = graphRuns ?? trace.runs;
     const mappedSections = this.buildTraceSections(runs, section, 'end', false, coordinates[0], true, Boolean(graphRuns));
     const sectionBuildMs = performance.now() - sectionBuildStartedAt;
+
     if (mappedSections.length === 0) throw new Error('No connected road or trail geometry was found under the selected range.');
+
     return {
       start: selection.start,
       end: selection.end,
@@ -1992,22 +2002,20 @@ export class TrackBuilderController {
     };
   }
 
-  // Shortest connected route through the selectable line features currently visible.
-  private routeVisibleSnapNetwork(
-    startCoordinate: TrackBuilderCoordinate,
-    endCoordinate: TrackBuilderCoordinate,
-    corridorRadiusPixels: number,
-  ): DragTraceRun[] | undefined {
+  private routeVisibleSnapNetwork(startCoordinate: TrackBuilderCoordinate, endCoordinate: TrackBuilderCoordinate, corridorRadiusPixels: number): DragTraceRun[] | undefined {
     const sections = this.candidateSections(this.options.map.queryRenderedFeatures());
+
     if (this.snapPreferredCandidate && !sections.some(section => section.id === this.snapPreferredCandidate?.id)) {
       sections.push(this.snapPreferredCandidate);
     }
+
     if (sections.length === 0) {
       logger.scope('TrackBuilder').debug('visible snap network has no selectable candidates', {
         draftKey: this.key,
         selectableLayers: [...this.selectableLayers],
         customized: this.layerSelectionCustomized,
       });
+
       return undefined;
     }
 
@@ -2015,32 +2023,41 @@ export class TrackBuilderController {
     const keyForPosition = (candidateIndex: number, position: TrackBuilderLinePosition): string => {
       const offset = Math.round((position.segmentIndex + position.t) * 1e8) / 1e8;
       let candidatePositions = positions.get(candidateIndex);
+
       if (!candidatePositions) positions.set(candidateIndex, candidatePositions = new Map<string, TrackBuilderLinePosition>());
       const key = `${candidateIndex}:${offset}`;
+
       candidatePositions.set(key, position);
+
       return key;
     };
     const graph = new Map<string, SnapGraphEdge[]>();
     const addEdge = (from: string, edge: SnapGraphEdge): void => {
       const edges = graph.get(from) ?? [];
+
       edges.push(edge);
       graph.set(from, edges);
     };
     const anchor = (coordinate: TrackBuilderCoordinate, virtualKey: string): number => {
       let count = 0;
+
       for (let index = 0; index < sections.length; index++) {
         const candidateCoordinates = sections[index].sourceCoordinates ?? sections[index].coordinates;
         const connection = this.coordinateLineConnection(coordinate, candidateCoordinates);
+
         if (connection.geographicDistanceMeters > this.snapRadiusMeters) continue;
         const key = keyForPosition(index, connection.position);
+
         addEdge(virtualKey, { to: key, weight: connection.geographicDistanceMeters });
         addEdge(key, { to: virtualKey, weight: connection.geographicDistanceMeters });
         count++;
       }
+
       return count;
     };
     const startAnchorCount = anchor(startCoordinate, 'start');
     const endAnchorCount = anchor(endCoordinate, 'end');
+
     if (startAnchorCount === 0 || endAnchorCount === 0) {
       logger.scope('TrackBuilder').debug('visible snap network endpoint unmatched', {
         draftKey: this.key,
@@ -2050,34 +2067,39 @@ export class TrackBuilderController {
         radiusMeters: this.snapRadiusMeters,
         layers: [...new Set(sections.map(section => `${section.sourceLayer ?? ''}/${section.layerId}`))],
       });
+
       return undefined;
     }
 
     let junctionCount = 0;
+
     for (let left = 0; left < sections.length; left++) {
       for (let right = left + 1; right < sections.length; right++) {
         const resolution = this.resolveSectionConnection(sections[left], sections[right]);
+
         if (!resolution.connected) continue;
         const connections = compatibleTrackBuilderJunctions(
           sections[left],
           sections[right],
           coordinate => {
             const point = this.options.map.project(coordinate as [number, number]);
+
             return [point.x, point.y];
           },
-          geographicDistanceMeters,
+          (a, b) => DistanceCalculator.haversineDistanceMeters(a[1], a[0], b[1], b[0]),
           JUNCTION_MAX_SCREEN_DISTANCE_PIXELS,
           JUNCTION_MAX_GEOGRAPHIC_DISTANCE_METERS,
           this.options.config.respectGradeSeparation,
         );
-        // An exact interior intersection is not necessarily represented by a
-        // vector-tile endpoint; the general resolver result is retained as well.
+
         connections.push(resolution.connection);
         const pairKeys = new Set<string>();
+
         for (const connection of connections) {
           const leftKey = keyForPosition(left, connection.a);
           const rightKey = keyForPosition(right, connection.b);
           const pairKey = `${leftKey}>${rightKey}`;
+
           if (pairKeys.has(pairKey)) continue;
           pairKeys.add(pairKey);
           addEdge(leftKey, { to: rightKey, weight: connection.geographicDistanceMeters });
@@ -2088,24 +2110,20 @@ export class TrackBuilderController {
     }
 
     let corridorPenalizedEdgeCount = 0;
+
     for (const [candidateIndex, candidatePositions] of positions) {
       const ordered = [...candidatePositions.entries()].sort((left, right) => this.positionOffset(left[1]) - this.positionOffset(right[1]));
       const coordinates = sections[candidateIndex].sourceCoordinates ?? sections[candidateIndex].coordinates;
+
       for (let index = 1; index < ordered.length; index++) {
         const [leftKey, leftPosition] = ordered[index - 1];
         const [rightKey, rightPosition] = ordered[index];
         const range = sliceLine(coordinates, leftPosition, rightPosition);
-        // Recorded activities can retrace the same trail (an out-and-back, a
-        // loop stem, or a return to the trailhead). Previously used geometry
-        // must cost its real length, not receive an overlap penalty that
-        // forces an unrelated detour.
         const distance = this.coordinatePathDistance(range);
         const deviation = this.maximumPathDeviationPixels(range, startCoordinate, endCoordinate);
-        // The corridor radius is a preference, not a validity boundary: a trail
-        // can briefly leave it and still be the closest connected route.
-        // Excursions are penalized rather than excluded.
         const normalizedDeviation = deviation / Math.max(1, corridorRadiusPixels);
         const weight = distance * (1 + normalizedDeviation * normalizedDeviation);
+
         if (deviation > corridorRadiusPixels) corridorPenalizedEdgeCount++;
         addEdge(leftKey, { to: rightKey, weight, candidate: sections[candidateIndex], start: leftPosition, end: rightPosition });
         addEdge(rightKey, { to: leftKey, weight, candidate: sections[candidateIndex], start: rightPosition, end: leftPosition });
@@ -2113,11 +2131,13 @@ export class TrackBuilderController {
     }
 
     const preferredIndexes = new Set<number>();
+
     if (this.snapPreferredCandidate) {
       sections.forEach((section, index) => {
         if (section.id === this.snapPreferredCandidate?.id) preferredIndexes.add(index);
       });
     }
+
     const requiresPreferred = preferredIndexes.size > 0;
     const stateKey = (node: string, visitedPreferred: boolean): string => `${node}\u0000${visitedPreferred ? 1 : 0}`;
     const stateNode = (state: string): string => state.slice(0, state.lastIndexOf('\u0000'));
@@ -2127,17 +2147,22 @@ export class TrackBuilderController {
     const distance = new Map<string, number>([[startState, 0]]);
     const previous = new Map<string, { from: string; edge: SnapGraphEdge }>();
     const pending = new Set<string>([startState]);
+
     while (pending.size > 0) {
       let current: string | undefined;
       let currentDistance = Number.POSITIVE_INFINITY;
+
       for (const key of pending) {
         const value = distance.get(key) ?? Number.POSITIVE_INFINITY;
+
         if (value < currentDistance) { current = key; currentDistance = value; }
       }
+
       if (!current || !Number.isFinite(currentDistance)) break;
       pending.delete(current);
       if (current === endState) break;
       const node = stateNode(current);
+
       for (const edge of graph.get(node) ?? []) {
         const destinationIndex = Number.parseInt(edge.to.split(':', 1)[0], 10);
         const visitedPreferred = stateVisited(current)
@@ -2145,12 +2170,14 @@ export class TrackBuilderController {
           || preferredIndexes.has(destinationIndex);
         const nextState = stateKey(edge.to, visitedPreferred);
         const nextDistance = currentDistance + edge.weight;
+
         if (nextDistance >= (distance.get(nextState) ?? Number.POSITIVE_INFINITY)) continue;
         distance.set(nextState, nextDistance);
         previous.set(nextState, { from: current, edge });
         pending.add(nextState);
       }
     }
+
     if (!previous.has(endState)) {
       logger.scope('TrackBuilder').debug('visible snap network is disconnected', {
         draftKey: this.key,
@@ -2163,30 +2190,38 @@ export class TrackBuilderController {
         corridorRadiusPixels: Math.round(corridorRadiusPixels * 10) / 10,
         layers: [...new Set(sections.map(section => `${section.sourceLayer ?? ''}/${section.layerId}`))],
       });
+
       return undefined;
     }
 
     const edges: SnapGraphEdge[] = [];
     let cursor = endState;
+
     while (cursor !== startState) {
       const step = previous.get(cursor);
+
       if (!step) return undefined;
       edges.push(step.edge);
       cursor = step.from;
     }
+
     edges.reverse();
     const routeDistanceMeters = edges.reduce((total, edge) => {
       if (!edge.candidate || !edge.start || !edge.end) return total + edge.weight;
       const coordinates = edge.candidate.sourceCoordinates ?? edge.candidate.coordinates;
+
       return total + this.coordinatePathDistance(sliceLine(coordinates, edge.start, edge.end));
     }, 0);
     const runs: DragTraceRun[] = [];
+
     for (const edge of edges) {
       if (!edge.candidate || !edge.start || !edge.end) continue;
       const last = runs[runs.length - 1];
+
       if (last?.candidate.id === edge.candidate.id && positionsEqual(last.end, edge.start)) last.end = edge.end;
       else runs.push({ candidate: edge.candidate, start: edge.start, end: edge.end });
     }
+
     logger.scope('TrackBuilder').debug('visible snap network route resolved', {
       draftKey: this.key,
       candidateCount: sections.length,
@@ -2206,39 +2241,42 @@ export class TrackBuilderController {
         endCoordinate: interpolateLine(run.candidate.sourceCoordinates ?? run.candidate.coordinates, run.end),
       })),
     });
+
     return runs.length > 0 ? runs : undefined;
   }
 
   private coordinatePathDistance(points: readonly TrackBuilderCoordinate[]): number {
     let distance = 0;
-    for (let index = 1; index < points.length; index++) distance += geographicDistanceMeters(points[index - 1], points[index]);
+
+    for (let index = 1; index < points.length; index++) distance += DistanceCalculator.haversineDistanceMeters(points[index - 1][1], points[index - 1][0], points[index][1], points[index][0]);
+
     return distance;
   }
 
-  private maximumPathDeviationPixels(
-    points: readonly TrackBuilderCoordinate[],
-    start: TrackBuilderCoordinate,
-    end: TrackBuilderCoordinate,
-  ): number {
+  private maximumPathDeviationPixels(points: readonly TrackBuilderCoordinate[], start: TrackBuilderCoordinate, end: TrackBuilderCoordinate): number {
     const a = this.options.map.project(start as [number, number]);
     const b = this.options.map.project(end as [number, number]);
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const lengthSquared = dx * dx + dy * dy;
     let maximum = 0;
+
     for (const coordinate of points) {
       const point = this.options.map.project(coordinate as [number, number]);
       const t = lengthSquared === 0
         ? 0
         : Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared));
+
       maximum = Math.max(maximum, Math.hypot(point.x - (a.x + t * dx), point.y - (a.y + t * dy)));
     }
+
     return maximum;
   }
 
   private mapSnapRadiusPixels(point: TrackBuilderMapSnapPoint): number {
     const lngLat = this.options.map.unproject(point as maplibregl.Point);
     const offset = this.options.map.project([lngLat.lng, lngLat.lat + this.snapRadiusMeters / 111_320]);
+
     return Math.max(4, Math.min(MAP_SNAP_MAX_RADIUS_PIXELS, Math.hypot(offset.x - point.x, offset.y - point.y)));
   }
 
@@ -2247,19 +2285,23 @@ export class TrackBuilderController {
     let minY = Number.POSITIVE_INFINITY;
     let maxX = Number.NEGATIVE_INFINITY;
     let maxY = Number.NEGATIVE_INFINITY;
+
     for (const point of points) {
       minX = Math.min(minX, point.x);
       minY = Math.min(minY, point.y);
       maxX = Math.max(maxX, point.x);
       maxY = Math.max(maxY, point.y);
     }
+
     const sections = this.candidateSections(this.options.map.queryRenderedFeatures([
       [minX - radiusPixels, minY - radiusPixels],
       [maxX + radiusPixels, maxY + radiusPixels],
     ]));
+
     if (this.snapPreferredCandidate && !sections.some(section => section.id === this.snapPreferredCandidate?.id)) {
       sections.push(this.snapPreferredCandidate);
     }
+
     return this.createCandidateIndex(sections, radiusPixels, { minX, minY, maxX, maxY });
   }
 
@@ -2270,31 +2312,25 @@ export class TrackBuilderController {
     );
   }
 
-  private createCandidateIndex(
-    sections: readonly TrackBuilderSection[],
-    radiusPixels: number,
-    bounds?: TrackBuilderCandidateBounds,
-  ): SnapCandidateIndex {
+  private createCandidateIndex(sections: readonly TrackBuilderSection[], radiusPixels: number, bounds?: TrackBuilderCandidateBounds): SnapCandidateIndex {
     const candidates = sections.map(section => {
       const projected = (section.sourceCoordinates ?? section.coordinates).map(coordinate => {
         const point = this.options.map.project(coordinate as [number, number]);
+
         return [point.x, point.y] as TrackBuilderSelectionPoint;
       });
+
       return {
         candidate: section,
         points: projected,
         bounds: trackBuilderCandidateBounds(projected),
       };
     });
+
     return createTrackBuilderCandidateIndex(candidates, radiusPixels, bounds);
   }
 
-  private findMapSnapMatch(
-    point: TrackBuilderMapSnapPoint,
-    candidateIndex: SnapCandidateIndex,
-    radiusPixels: number,
-    preferred?: TrackBuilderSection,
-  ): TrackBuilderMapSnapMatch<TrackBuilderSection> | undefined {
+  private findMapSnapMatch(point: TrackBuilderMapSnapPoint, candidateIndex: SnapCandidateIndex, radiusPixels: number, preferred?: TrackBuilderSection): TrackBuilderMapSnapMatch<TrackBuilderSection> | undefined {
     const radiusMeters = this.snapRadiusMeters;
     const lngLat = this.options.map.unproject(point as maplibregl.Point);
     const candidates = trackBuilderCandidatesAt(candidateIndex, [point.x, point.y]);
@@ -2306,27 +2342,35 @@ export class TrackBuilderController {
         || point.x > candidate.bounds.maxX + radiusPixels
         || point.y < candidate.bounds.minY - radiusPixels
         || point.y > candidate.bounds.maxY + radiusPixels) return undefined;
+
       const candidateCoordinates = candidate.candidate.sourceCoordinates ?? candidate.candidate.coordinates;
       const closest = closestTrackBuilderProjectedPosition([point.x, point.y], candidate.points);
       const position = closest.position;
       const coordinate = interpolateLine(candidateCoordinates, position);
       const screenDistancePixels = closest.distance;
-      if (screenDistancePixels > radiusPixels || geographicDistanceMeters([lngLat.lng, lngLat.lat], coordinate) > radiusMeters) return undefined;
+
+      if (screenDistancePixels > radiusPixels || DistanceCalculator.haversineDistanceMeters(lngLat.lat, lngLat.lng, coordinate[1], coordinate[0]) > radiusMeters) return undefined;
+
       return { candidate: candidate.candidate, position, screenDistancePixels };
     };
 
     let closest: ReturnType<typeof match>;
+
     for (const candidate of candidates) {
       const candidateMatch = match(candidate);
+
       if (candidateMatch && (!closest || candidateMatch.screenDistancePixels < closest.screenDistancePixels)) closest = candidateMatch;
     }
+
     const chosen = this.snapPreferredCandidate
       ? candidates.find(candidate => candidate.candidate.id === this.snapPreferredCandidate?.id)
       : undefined;
     const chosenMatch = chosen ? match(chosen) : undefined;
+
     if (chosenMatch) return chosenMatch;
     const previous = preferred ? candidates.find(candidate => candidate.candidate.id === preferred.id) : undefined;
     const preferredMatch = previous ? match(previous) : undefined;
+
     if (preferredMatch && shouldKeepPreferredTrackCandidate(
       preferredMatch.screenDistancePixels,
       closest?.screenDistancePixels ?? Number.POSITIVE_INFINITY,
@@ -2334,6 +2378,7 @@ export class TrackBuilderController {
     )) {
       return preferredMatch;
     }
+
     return closest;
   }
 
@@ -2343,8 +2388,10 @@ export class TrackBuilderController {
     const end = section.endPosition ?? { segmentIndex: sourceCoordinates.length - 2, t: 1 };
     const low = comparePositions(start, end) <= 0 ? start : end;
     const high = comparePositions(start, end) <= 0 ? end : start;
+
     if (comparePositions(position, low) < 0) return low;
     if (comparePositions(position, high) > 0) return high;
+
     return position;
   }
 
@@ -2360,13 +2407,15 @@ export class TrackBuilderController {
     let high = Math.min(highBound, Math.ceil(centerOffset));
 
     // Dense GPX points can be sub-pixel apart. Expand symmetrically until the
-    // circle centres are usable, while remaining inside the committed section.
+    // circle centers are usable, while remaining inside the committed section.
     while (this.positionScreenDistance(sourceCoordinates, low, high) < 32 && (low > lowBound || high < highBound)) {
       if (low > lowBound) low = Math.max(lowBound, low - 1);
       if (high < highBound) high = Math.min(highBound, high + 1);
     }
+
     const lowPosition = this.offsetPosition(low, sourceCoordinates.length);
     const highPosition = this.offsetPosition(high, sourceCoordinates.length);
+
     return comparePositions(sectionStart, sectionEnd) <= 0
       ? { start: lowPosition, end: highPosition }
       : { start: highPosition, end: lowPosition };
@@ -2374,16 +2423,20 @@ export class TrackBuilderController {
 
   private reverseDirection(): void {
     const sections = getTrackBuilderHistory(this.key).draft.sections;
+
     if (sections.length === 0) {
       this.status.setText('Nothing to reverse');
+
       return;
     }
+
     const reversed = sections.map((section, oldIndex) => ({ section, oldIndex }))
       .reverse()
       .map(({ section, oldIndex }, index) => ({
         ...reverseTrackBuilderSection(section),
         breakBefore: index === 0 ? undefined : sections[oldIndex + 1]?.breakBefore || undefined,
       }));
+
     this.deleteSelections = [];
     this.snapSelection = undefined;
     replaceTrackBuilderSections(this.key, reversed);
@@ -2402,14 +2455,17 @@ export class TrackBuilderController {
   private offsetPosition(offset: number, coordinateCount: number): TrackBuilderLinePosition {
     const maximum = coordinateCount - 1;
     const clamped = Math.max(0, Math.min(maximum, offset));
+
     if (clamped >= maximum) return { segmentIndex: maximum - 1, t: 1 };
     const segmentIndex = Math.floor(clamped);
+
     return { segmentIndex, t: clamped - segmentIndex };
   }
 
   private positionScreenDistance(coordinates: readonly TrackBuilderCoordinate[], a: number, b: number): number {
     const first = this.options.map.project(interpolateLine(coordinates, this.offsetPosition(a, coordinates.length)) as [number, number]);
     const second = this.options.map.project(interpolateLine(coordinates, this.offsetPosition(b, coordinates.length)) as [number, number]);
+
     return Math.hypot(first.x - second.x, first.y - second.y);
   }
 
@@ -2422,11 +2478,14 @@ export class TrackBuilderController {
       .sort((a, b) => originalOrder.get(b.sectionId)! - originalOrder.get(a.sectionId)!);
     let sections = [...history.draft.sections];
     const committed: Array<{ selection: DeleteSelection; section: TrackBuilderSection; retained: TrackBuilderSection[] }> = [];
+
     for (const selection of selections) {
       const result = this.deleteSelectionFromSections(sections, selection);
+
       sections = result.sections;
       if (result.section) committed.push({ selection, section: result.section, retained: result.retained });
     }
+
     logger.scope('TrackBuilder').debug('delete ranges committed', {
       draftKey: this.key,
       count: committed.length,
@@ -2448,6 +2507,7 @@ export class TrackBuilderController {
     retained: TrackBuilderSection[];
   } {
     const sectionIndex = sections.findIndex(section => section.id === selection.sectionId);
+
     if (sectionIndex < 0) return { sections, retained: [] };
     const section = sections[sectionIndex];
     const sourceCoordinates = section.sourceCoordinates ?? section.coordinates;
@@ -2455,9 +2515,11 @@ export class TrackBuilderController {
     const originalEnd = section.endPosition ?? { segmentIndex: sourceCoordinates.length - 2, t: 1 };
     const selectedLow = comparePositions(selection.start, selection.end) <= 0 ? selection.start : selection.end;
     const selectedHigh = comparePositions(selection.start, selection.end) <= 0 ? selection.end : selection.start;
+
     if (positionsEqual(selectedLow, selectedHigh)) return { sections, retained: [] };
 
     const retained: TrackBuilderSection[] = [];
+
     if (comparePositions(originalStart, originalEnd) <= 0) {
       if (!positionsEqual(originalStart, selectedLow) && comparePositions(originalStart, selectedLow) < 0) retained.push(this.trimmedPiece(section, originalStart, selectedLow, 'before'));
       if (!positionsEqual(selectedHigh, originalEnd) && comparePositions(selectedHigh, originalEnd) < 0) retained.push(this.trimmedPiece(section, selectedHigh, originalEnd, 'after'));
@@ -2468,14 +2530,18 @@ export class TrackBuilderController {
 
     const deletesRouteStart = positionsEqual(originalStart, selectedLow) || positionsEqual(originalStart, selectedHigh);
     const deletesRouteEnd = positionsEqual(originalEnd, selectedLow) || positionsEqual(originalEnd, selectedHigh);
+
     if (retained.length === 2) retained[1] = { ...retained[1], breakBefore: true };
     else if (retained.length === 1 && deletesRouteStart) retained[0] = { ...retained[0], breakBefore: true };
 
     const next = [...sections];
+
     next.splice(sectionIndex, 1, ...retained);
+
     if (retained.length > 0 && deletesRouteEnd && next[sectionIndex + retained.length]) {
       next[sectionIndex + retained.length] = { ...next[sectionIndex + retained.length], breakBefore: true };
     }
+
     return { sections: retained.length === 0 ? this.reconnectDeletionSeam(next, sectionIndex - 1) : next, section, retained };
   }
 
@@ -2484,8 +2550,10 @@ export class TrackBuilderController {
     const coordinates = [...piece.coordinates];
     const preserveStart = section.startPosition && positionsEqual(start, section.startPosition) ? section.startCoordinateOverride : undefined;
     const preserveEnd = section.endPosition && positionsEqual(end, section.endPosition) ? section.endCoordinateOverride : undefined;
+
     if (preserveStart) coordinates[0] = preserveStart;
     if (preserveEnd) coordinates[coordinates.length - 1] = preserveEnd;
+
     return {
       ...piece,
       id: `${section.id}:trim-${suffix}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`,
@@ -2498,36 +2566,45 @@ export class TrackBuilderController {
   private reconnectDeletionSeam(sections: TrackBuilderSection[], leftIndex: number): TrackBuilderSection[] {
     const left = sections[leftIndex];
     const right = sections[leftIndex + 1];
+
     if (!right) return sections;
+
     const disconnected = () => {
       const copy = [...sections];
+
       copy[leftIndex + 1] = { ...right, breakBefore: true };
+
       return copy;
     };
+
     if (!left?.sourceCoordinates || !left.startPosition || !left.endPosition || !right.sourceCoordinates || !right.startPosition || !right.endPosition) return disconnected();
     const connection = this.closestLineConnection(left.sourceCoordinates, right.sourceCoordinates);
     const leftJunction = interpolateLine(left.sourceCoordinates, connection.a);
     const rightJunction = interpolateLine(right.sourceCoordinates, connection.b);
     const leftEnd = left.coordinates[left.coordinates.length - 1];
     const rightStart = right.coordinates[0];
-    const nearExistingEnds = geographicDistanceMeters(leftEnd, leftJunction) <= 20 && geographicDistanceMeters(rightStart, rightJunction) <= 20;
+    const nearExistingEnds = DistanceCalculator.haversineDistanceMeters(leftEnd[1], leftEnd[0], leftJunction[1], leftJunction[0]) <= 20 && DistanceCalculator.haversineDistanceMeters(rightStart[1], rightStart[0], rightJunction[1], rightJunction[0]) <= 20;
     const sourceFeaturesMeet = connection.screenDistancePixels <= 2 && connection.geographicDistanceMeters <= 1;
+
     if (!nearExistingEnds || !sourceFeaturesMeet) {
       logger.scope('TrackBuilder').debug('delete seam left disconnected', {
         draftKey: this.key,
         left: left.id,
         right: right.id,
         connection,
-        leftEndpointDistanceMeters: geographicDistanceMeters(leftEnd, leftJunction),
-        rightEndpointDistanceMeters: geographicDistanceMeters(rightStart, rightJunction),
+        leftEndpointDistanceMeters: DistanceCalculator.haversineDistanceMeters(leftEnd[1], leftEnd[0], leftJunction[1], leftJunction[0]),
+        rightEndpointDistanceMeters: DistanceCalculator.haversineDistanceMeters(rightStart[1], rightStart[0], rightJunction[1], rightJunction[0]),
       });
+
       return disconnected();
     }
+
     const common: TrackBuilderCoordinate = [
       (leftJunction[0] + rightJunction[0]) / 2,
       (leftJunction[1] + rightJunction[1]) / 2,
     ];
     const connected = [...sections];
+
     connected[leftIndex] = this.resizeCommittedSection(left, left.startPosition, connection.a, left.startCoordinateOverride, common);
     connected[leftIndex + 1] = { ...this.resizeCommittedSection(right, connection.b, right.endPosition, common, right.endCoordinateOverride), breakBefore: false };
     logger.scope('TrackBuilder').debug('delete seam reconnected', {
@@ -2537,6 +2614,7 @@ export class TrackBuilderController {
       connection,
       common,
     });
+
     return connected;
   }
 
@@ -2548,8 +2626,10 @@ export class TrackBuilderController {
     endOverride?: TrackBuilderCoordinate,
   ): TrackBuilderSection {
     const coordinates = sliceLine(section.sourceCoordinates ?? section.coordinates, start, end);
+
     if (startOverride) coordinates[0] = startOverride;
     if (endOverride) coordinates[coordinates.length - 1] = endOverride;
+
     return { ...section, startPosition: start, endPosition: end, startCoordinateOverride: startOverride, endCoordinateOverride: endOverride, coordinates };
   }
 
@@ -2557,10 +2637,13 @@ export class TrackBuilderController {
     const sections = getTrackBuilderHistory(this.key).draft.sections;
     const previousCoordinates = sections[sections.length - 1]?.coordinates;
     const previousEnd = previousCoordinates?.[previousCoordinates.length - 1];
+
     if (!previousEnd || !section.startPosition || !section.endPosition) return section;
     const start = section.coordinates[0];
     const end = section.coordinates[section.coordinates.length - 1];
+
     if (coordinateDistanceSquared(previousEnd, start) <= coordinateDistanceSquared(previousEnd, end)) return section;
+
     return reverseTrackBuilderSection(section);
   }
 
@@ -2569,12 +2652,15 @@ export class TrackBuilderController {
   // Interior point crossings are not clipped.
   private clipAddedSectionAgainstDraft(section: TrackBuilderSection, pointer?: maplibregl.Point): ClippedAddedSection | undefined {
     const existing = getTrackBuilderHistory(this.key).draft.sections;
+
     if (existing.length === 0) return { section };
     const sourceCoordinates = section.sourceCoordinates ?? section.coordinates;
     const continuation = pointer ? this.continuationFromDraftEndpoint(section, existing, pointer) : undefined;
+
     if (continuation) return continuation;
     const samples = this.overlapSamples(sourceCoordinates, existing);
     const clip = clipEndpointOverlapSamples(samples);
+
     if (!clip) return samples.some(sample => !sample.coveredBy) ? this.connectAddedSectionEndpoints(section, existing) : undefined;
     if (!clip.startTransition && !clip.endTransition) return this.connectAddedSectionEndpoints(section, existing);
 
@@ -2584,6 +2670,7 @@ export class TrackBuilderController {
     const endOffset = clip.endTransition
       ? this.refineOverlapTransition(sourceCoordinates, existing, clip.endTransition.coveredOffset, clip.endTransition.uncoveredOffset)
       : sourceCoordinates.length - 1;
+
     if (endOffset - startOffset <= 1e-6) return undefined;
 
     const start = this.offsetPosition(startOffset, sourceCoordinates.length);
@@ -2606,6 +2693,7 @@ export class TrackBuilderController {
         clip.endTransition.coveredBy,
       )
       : undefined;
+
     if (startContact) coordinates[0] = startContact.coordinate;
     if (endContact) coordinates[coordinates.length - 1] = endContact.coordinate;
 
@@ -2615,6 +2703,7 @@ export class TrackBuilderController {
       startCoordinateOverride: startContact?.coordinate,
       endCoordinateOverride: endContact?.coordinate,
     };
+
     logger.scope('TrackBuilder').debug('added feature clipped against existing draft', {
       draftKey: this.key,
       sourceSectionId: section.id,
@@ -2624,19 +2713,17 @@ export class TrackBuilderController {
       startContact: startContact ? { sectionId: startContact.section.id, coordinate: startContact.coordinate } : undefined,
       endContact: endContact ? { sectionId: endContact.section.id, coordinate: endContact.coordinate } : undefined,
     });
+
     return this.connectAddedSectionEndpoints(result, existing, startContact, endContact);
   }
 
-  private continuationFromDraftEndpoint(
-    section: TrackBuilderSection,
-    existing: readonly TrackBuilderSection[],
-    pointer: maplibregl.Point,
-  ): ClippedAddedSection | undefined {
+  private continuationFromDraftEndpoint(section: TrackBuilderSection, existing: readonly TrackBuilderSection[], pointer: maplibregl.Point): ClippedAddedSection | undefined {
     const source = section.sourceCoordinates ?? section.coordinates;
     const first = existing[0];
     const last = existing[existing.length - 1];
     const routeStart = first?.coordinates[0];
     const routeEnd = last?.coordinates[last.coordinates.length - 1];
+
     if (!routeStart || !routeEnd || source.length < 2) return undefined;
     const pointerPosition = this.positionOnLine(pointer, source);
     const endpoints = [
@@ -2648,12 +2735,16 @@ export class TrackBuilderController {
       const connection = this.positionOnLine(endpointPoint, source, pointerPosition);
       const connectionCoordinate = interpolateLine(source, connection);
       const connectionPoint = this.options.map.project(connectionCoordinate as [number, number]);
+
       return {
         ...endpoint,
         connection,
         connectionCoordinate,
         screenDistancePixels: Math.hypot(endpointPoint.x - connectionPoint.x, endpointPoint.y - connectionPoint.y),
-        geographicDistanceMeters: geographicDistanceMeters(endpoint.coordinate, connectionCoordinate),
+        geographicDistanceMeters: DistanceCalculator.haversineDistanceMeters(
+          endpoint.coordinate[1], endpoint.coordinate[0],
+          connectionCoordinate[1], connectionCoordinate[0],
+        ),
       };
     });
     const selected = chooseTrackEndpointContinuation(
@@ -2662,6 +2753,7 @@ export class TrackBuilderController {
       ADD_OVERLAP_MAX_SCREEN_DISTANCE_PIXELS,
       ADD_OVERLAP_MAX_GEOGRAPHIC_DISTANCE_METERS,
     );
+
     if (!selected) return undefined;
     const { connection, coordinate: endpointCoordinate } = selected;
 
@@ -2670,6 +2762,7 @@ export class TrackBuilderController {
     const outwardEnd = comparePositions(pointerPosition, connection) >= 0 ? sourceEnd : sourceStart;
     const continued = this.sectionBetween(section, connection, outwardEnd);
     const coordinates = [...continued.coordinates];
+
     coordinates[0] = endpointCoordinate;
     const contact: DraftOverlapContact = {
       section: selected.section,
@@ -2680,6 +2773,7 @@ export class TrackBuilderController {
       screenDistancePixels: selected.screenDistancePixels,
       geographicDistanceMeters: selected.geographicDistanceMeters,
     };
+
     logger.scope('TrackBuilder').debug('candidate continued from draft endpoint', {
       draftKey: this.key,
       sourceSectionId: section.id,
@@ -2691,6 +2785,7 @@ export class TrackBuilderController {
       screenDistancePixels: selected.screenDistancePixels,
       geographicDistanceMeters: selected.geographicDistanceMeters,
     });
+
     return {
       section: {
         ...continued,
@@ -2702,17 +2797,14 @@ export class TrackBuilderController {
     };
   }
 
-  private connectAddedSectionEndpoints(
-    section: TrackBuilderSection,
-    existing: readonly TrackBuilderSection[],
-    confirmedStart?: DraftOverlapContact,
-    confirmedEnd?: DraftOverlapContact,
-  ): ClippedAddedSection {
+  private connectAddedSectionEndpoints(section: TrackBuilderSection, existing: readonly TrackBuilderSection[], confirmedStart?: DraftOverlapContact, confirmedEnd?: DraftOverlapContact): ClippedAddedSection {
     const coordinates = [...section.coordinates];
     const startContact = confirmedStart ?? this.closestAlignedDraftEndpoint(coordinates, 'start', existing);
     const endContact = confirmedEnd ?? this.closestAlignedDraftEndpoint(coordinates, 'end', existing);
+
     if (startContact) coordinates[0] = startContact.coordinate;
     if (endContact) coordinates[coordinates.length - 1] = endContact.coordinate;
+
     return {
       section: {
         ...section,
@@ -2725,11 +2817,7 @@ export class TrackBuilderController {
     };
   }
 
-  private closestAlignedDraftEndpoint(
-    coordinates: readonly TrackBuilderCoordinate[],
-    endpoint: 'start' | 'end',
-    existing: readonly TrackBuilderSection[],
-  ): DraftOverlapContact | undefined {
+  private closestAlignedDraftEndpoint(coordinates: readonly TrackBuilderCoordinate[], endpoint: 'start' | 'end', existing: readonly TrackBuilderSection[]): DraftOverlapContact | undefined {
     if (coordinates.length < 2) return undefined;
     const endpointIndex = endpoint === 'start' ? 0 : coordinates.length - 1;
     const referenceIndex = endpoint === 'start'
@@ -2738,21 +2826,24 @@ export class TrackBuilderController {
     const coordinate = coordinates[endpointIndex];
     const point = this.options.map.project(coordinate as [number, number]);
     const reference = this.options.map.project(coordinates[referenceIndex] as [number, number]);
-    // At the start this points backwards out of the feature; at the end it points forwards.
     const tangentX = point.x - reference.x;
     const tangentY = point.y - reference.y;
     const tangentLength = Math.hypot(tangentX, tangentY);
+
     if (tangentLength < 1e-6) return undefined;
 
     let best: DraftOverlapContact | undefined;
+
     for (const section of existing) {
       if (section.coordinates.length < 2) continue;
+
       for (const side of ['start', 'end'] as const) {
         const target = side === 'start' ? section.coordinates[0] : section.coordinates[section.coordinates.length - 1];
         const targetPoint = this.options.map.project(target as [number, number]);
         const dx = targetPoint.x - point.x;
         const dy = targetPoint.y - point.y;
         const targetLength = Math.hypot(dx, dy);
+
         if (targetLength < 1e-6) {
           return {
             section,
@@ -2762,8 +2853,10 @@ export class TrackBuilderController {
             geographicDistanceMeters: 0,
           };
         }
-        const distanceMeters = geographicDistanceMeters(coordinate, target);
+
+        const distanceMeters = DistanceCalculator.haversineDistanceMeters(coordinate[1], coordinate[0], target[1], target[0]);
         const alignmentCosine = (tangentX * dx + tangentY * dy) / (tangentLength * targetLength);
+
         if (!shouldBridgeNearbyTrackEndpoint(distanceMeters, alignmentCosine)) continue;
         const candidate: DraftOverlapContact = {
           section,
@@ -2772,9 +2865,11 @@ export class TrackBuilderController {
           screenDistancePixels: targetLength,
           geographicDistanceMeters: distanceMeters,
         };
+
         if (!best || candidate.geographicDistanceMeters < best.geographicDistanceMeters) best = candidate;
       }
     }
+
     if (best) {
       logger.scope('TrackBuilder').debug('added feature endpoint bridged to nearby draft endpoint', {
         draftKey: this.key,
@@ -2786,6 +2881,7 @@ export class TrackBuilderController {
         geographicDistanceMeters: best.geographicDistanceMeters,
       });
     }
+
     return best;
   }
 
@@ -2793,11 +2889,14 @@ export class TrackBuilderController {
     const sections = getTrackBuilderHistory(this.key).draft.sections;
     const startIndex = clipped.startContact ? sections.findIndex(section => section.id === clipped.startContact!.section.id) : -1;
     const endIndex = clipped.endContact ? sections.findIndex(section => section.id === clipped.endContact!.section.id) : -1;
+
     if (startIndex >= 0 && endIndex >= 0 && endIndex + 1 === startIndex) {
       return { section: reverseTrackBuilderSection(clipped.section), startContact: clipped.endContact, endContact: clipped.startContact };
     }
+
     if (startIndex >= 0 && endIndex === startIndex + 1) return clipped;
     const section = this.orientNewSection(clipped.section);
+
     return section === clipped.section
       ? clipped
       : { section, startContact: clipped.endContact, endContact: clipped.startContact };
@@ -2807,16 +2906,18 @@ export class TrackBuilderController {
     const sections = getTrackBuilderHistory(this.key).draft.sections;
     const startIndex = added.startContact ? sections.findIndex(section => section.id === added.startContact!.section.id) : -1;
     const endIndex = added.endContact ? sections.findIndex(section => section.id === added.endContact!.section.id) : -1;
-    const startsAtLeftEnd = startIndex >= 0 && geographicDistanceMeters(
-      added.startContact!.coordinate,
-      sections[startIndex].coordinates[sections[startIndex].coordinates.length - 1],
+    const startsAtLeftEnd = startIndex >= 0 && DistanceCalculator.haversineDistanceMeters(
+      added.startContact!.coordinate[1], added.startContact!.coordinate[0],
+      sections[startIndex].coordinates[sections[startIndex].coordinates.length - 1][1], sections[startIndex].coordinates[sections[startIndex].coordinates.length - 1][0],
     ) <= 1;
-    const endsAtRightStart = endIndex >= 0 && geographicDistanceMeters(
-      added.endContact!.coordinate,
-      sections[endIndex].coordinates[0],
+    const endsAtRightStart = endIndex >= 0 && DistanceCalculator.haversineDistanceMeters(
+      added.endContact!.coordinate[1], added.endContact!.coordinate[0],
+      sections[endIndex].coordinates[0][1], sections[endIndex].coordinates[0][0],
     ) <= 1;
+
     if (startsAtLeftEnd && endsAtRightStart && endIndex === startIndex + 1) {
       const next = [...sections];
+
       next.splice(endIndex, 0, { ...added.section, breakBefore: false });
       next[endIndex + 1] = { ...next[endIndex + 1], breakBefore: false };
       replaceTrackBuilderSections(this.key, next);
@@ -2826,17 +2927,22 @@ export class TrackBuilderController {
         addedSectionId: added.section.id,
         rightSectionId: sections[endIndex].id,
       });
+
       return;
     }
+
     const firstCoordinates = sections[0]?.coordinates;
     const routeStart = firstCoordinates?.[0];
     const addedStart = added.section.coordinates[0];
     const addedEnd = added.section.coordinates[added.section.coordinates.length - 1];
+
     if (routeStart) {
-      const startDistance = geographicDistanceMeters(routeStart, addedStart);
-      const endDistance = geographicDistanceMeters(routeStart, addedEnd);
+      const startDistance = DistanceCalculator.haversineDistanceMeters(routeStart[1], routeStart[0], addedStart[1], addedStart[0]);
+      const endDistance = DistanceCalculator.haversineDistanceMeters(routeStart[1], routeStart[0], addedEnd[1], addedEnd[0]);
+
       if (Math.min(startDistance, endDistance) <= CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS) {
         const prepended = startDistance <= endDistance ? reverseTrackBuilderSection(added.section) : added.section;
+
         prependTrackBuilderSections(this.key, [{ ...prepended, breakBefore: prepended.breakBefore }]);
         logger.scope('TrackBuilder').debug('connected feature prepended at route start', {
           draftKey: this.key,
@@ -2844,70 +2950,73 @@ export class TrackBuilderController {
           added: sectionLogData(prepended),
           distanceMeters: Math.min(startDistance, endDistance),
         });
+
         return;
       }
     }
+
     const previousCoordinates = sections[sections.length - 1]?.coordinates;
     const previousEnd = previousCoordinates?.[previousCoordinates.length - 1];
-    if (previousEnd && geographicDistanceMeters(previousEnd, added.section.coordinates[0]) > CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS) {
+
+    if (previousEnd && DistanceCalculator.haversineDistanceMeters(
+      previousEnd[1], previousEnd[0],
+      added.section.coordinates[0][1], added.section.coordinates[0][0],
+    ) > CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS) {
       this.startNewPiece([added.section], 'feature');
+
       return;
     }
+
     appendTrackBuilderSection(this.key, added.section);
   }
 
-  private overlapSamples(
-    coordinates: readonly TrackBuilderCoordinate[],
-    existing: readonly TrackBuilderSection[],
-  ): TrackOverlapSample[] {
+  private overlapSamples(coordinates: readonly TrackBuilderCoordinate[], existing: readonly TrackBuilderSection[]): TrackOverlapSample[] {
     const samples: TrackOverlapSample[] = [];
+
     for (let index = 1; index < coordinates.length; index++) {
       const a = this.options.map.project(coordinates[index - 1] as [number, number]);
       const b = this.options.map.project(coordinates[index] as [number, number]);
       const count = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / ADD_OVERLAP_SAMPLE_SPACING_PIXELS));
       const firstStep = index === 1 ? 0 : 1;
+
       for (let step = firstStep; step <= count; step++) {
         const t = step / count;
         const coordinate: TrackBuilderCoordinate = [
           coordinates[index - 1][0] + (coordinates[index][0] - coordinates[index - 1][0]) * t,
           coordinates[index - 1][1] + (coordinates[index][1] - coordinates[index - 1][1]) * t,
         ];
+
         samples.push({
           offset: index - 1 + t,
           coveredBy: this.closestDraftOverlap(coordinate, existing)?.section.id,
         });
       }
     }
+
     return samples;
   }
 
-  private refineOverlapTransition(
-    coordinates: readonly TrackBuilderCoordinate[],
-    existing: readonly TrackBuilderSection[],
-    coveredOffset: number,
-    uncoveredOffset: number,
-  ): number {
+  private refineOverlapTransition(coordinates: readonly TrackBuilderCoordinate[], existing: readonly TrackBuilderSection[], coveredOffset: number, uncoveredOffset: number): number {
     let covered = coveredOffset;
     let uncovered = uncoveredOffset;
+
     for (let iteration = 0; iteration < 10; iteration++) {
       const middle = (covered + uncovered) / 2;
       const coordinate = interpolateLine(coordinates, this.offsetPosition(middle, coordinates.length));
+
       if (this.closestDraftOverlap(coordinate, existing)) covered = middle;
       else uncovered = middle;
     }
+
     return (covered + uncovered) / 2;
   }
 
-  private closestDraftOverlap(
-    coordinate: TrackBuilderCoordinate,
-    existing: readonly TrackBuilderSection[],
-    preferredSectionId?: string,
-  ): DraftOverlapContact | undefined {
+  private closestDraftOverlap(coordinate: TrackBuilderCoordinate, existing: readonly TrackBuilderSection[], preferredSectionId?: string): DraftOverlapContact | undefined {
     const point = this.options.map.project(coordinate as [number, number]);
     let best: DraftOverlapContact | undefined;
+
     for (const section of existing) {
       if (preferredSectionId && section.id !== preferredSectionId) continue;
-      // Use committed coordinates. sourceCoordinates can include portions the user already trimmed.
       if (section.coordinates.length < 2) continue;
       const position = this.positionOnLine(point, section.coordinates);
       const projected = interpolateLine(section.coordinates, position);
@@ -2917,29 +3026,31 @@ export class TrackBuilderController {
         position,
         coordinate: projected,
         screenDistancePixels: Math.hypot(point.x - projectedPoint.x, point.y - projectedPoint.y),
-        geographicDistanceMeters: geographicDistanceMeters(coordinate, projected),
+        geographicDistanceMeters: DistanceCalculator.haversineDistanceMeters(coordinate[1], coordinate[0], projected[1], projected[0]),
       };
+
       if (candidate.screenDistancePixels > ADD_OVERLAP_MAX_SCREEN_DISTANCE_PIXELS
         || candidate.geographicDistanceMeters > ADD_OVERLAP_MAX_GEOGRAPHIC_DISTANCE_METERS) continue;
+
       if (!best || candidate.screenDistancePixels < best.screenDistancePixels) best = candidate;
     }
+
     return best;
   }
 
   private sectionBetween(section: TrackBuilderSection, start: TrackBuilderLinePosition, end: TrackBuilderLinePosition): TrackBuilderSection {
     const sourceCoordinates = section.sourceCoordinates ?? section.coordinates;
+
     return { ...section, id: `${section.id}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`, sourceFeatureKey: section.sourceFeatureKey ?? section.id, sourceCoordinates, startPosition: start, endPosition: end, coordinates: sliceLine(sourceCoordinates, start, end) };
   }
 
-  private positionOnLine(
-    point: maplibregl.Point,
-    coordinates: readonly TrackBuilderCoordinate[],
-    reference?: TrackBuilderLinePosition,
-  ): TrackBuilderLinePosition {
+  private positionOnLine(point: maplibregl.Point, coordinates: readonly TrackBuilderCoordinate[], reference?: TrackBuilderLinePosition): TrackBuilderLinePosition {
     const projected = coordinates.map(coordinate => {
       const screenPoint = this.options.map.project(coordinate as [number, number]);
+
       return [screenPoint.x, screenPoint.y] as TrackBuilderSelectionPoint;
     });
+
     return prioritizeTrackBuilderVertexPosition(
       projected,
       closestTrackBuilderLinePosition([point.x, point.y], projected, reference),
@@ -2962,27 +3073,32 @@ export class TrackBuilderController {
         a: aPosition,
         b: bPosition,
         screenDistancePixels: Math.hypot(aPoint.x - bPoint.x, aPoint.y - bPoint.y),
-        geographicDistanceMeters: geographicDistanceMeters(aCoordinate, bCoordinate),
+        geographicDistanceMeters: DistanceCalculator.haversineDistanceMeters(aCoordinate[1], aCoordinate[0], bCoordinate[1], bCoordinate[0]),
       };
+
       if (!best || candidate.screenDistancePixels < best.screenDistancePixels) best = candidate;
     };
     const cross = (x1: number, y1: number, x2: number, y2: number) => x1 * y2 - y1 * x2;
+
     for (let aIndex = 1; aIndex < a.length; aIndex++) {
       const aStart = this.options.map.project(a[aIndex - 1] as [number, number]);
       const aEnd = this.options.map.project(a[aIndex] as [number, number]);
       const aDx = aEnd.x - aStart.x;
       const aDy = aEnd.y - aStart.y;
+
       for (let bIndex = 1; bIndex < b.length; bIndex++) {
         const bStart = this.options.map.project(b[bIndex - 1] as [number, number]);
         const bEnd = this.options.map.project(b[bIndex] as [number, number]);
         const bDx = bEnd.x - bStart.x;
         const bDy = bEnd.y - bStart.y;
         const denominator = cross(aDx, aDy, bDx, bDy);
+
         if (Math.abs(denominator) < 1e-9) continue;
         const offsetX = bStart.x - aStart.x;
         const offsetY = bStart.y - aStart.y;
         const aT = cross(offsetX, offsetY, bDx, bDy) / denominator;
         const bT = cross(offsetX, offsetY, aDx, aDy) / denominator;
+
         if (aT < -1e-6 || aT > 1 + 1e-6 || bT < -1e-6 || bT > 1 + 1e-6) continue;
         consider(
           { segmentIndex: aIndex - 1, t: Math.max(0, Math.min(1, aT)) },
@@ -2990,14 +3106,18 @@ export class TrackBuilderController {
         );
       }
     }
+
     a.forEach((coordinate, index) => {
       const aPosition = index === a.length - 1 ? { segmentIndex: index - 1, t: 1 } : { segmentIndex: index, t: 0 };
+
       consider(aPosition, this.positionOnLine(this.options.map.project(coordinate as [number, number]), b));
     });
     b.forEach((coordinate, index) => {
       const bPosition = index === b.length - 1 ? { segmentIndex: index - 1, t: 1 } : { segmentIndex: index, t: 0 };
+
       consider(this.positionOnLine(this.options.map.project(coordinate as [number, number]), a), bPosition);
     });
+
     return best!;
   }
 
@@ -3010,10 +3130,11 @@ export class TrackBuilderController {
     const position = this.positionOnLine(point, line);
     const projected = interpolateLine(line, position);
     const projectedPoint = this.options.map.project(projected as [number, number]);
+
     return {
       position,
       screenDistancePixels: Math.hypot(point.x - projectedPoint.x, point.y - projectedPoint.y),
-      geographicDistanceMeters: geographicDistanceMeters(coordinate, projected),
+      geographicDistanceMeters: DistanceCalculator.haversineDistanceMeters(coordinate[1], coordinate[0], projected[1], projected[0]),
     };
   }
 
@@ -3038,21 +3159,25 @@ export class TrackBuilderController {
     );
     const gradeCompatible = !this.options.config.respectGradeSeparation
       || areTrackBuilderJunctionSectionsCompatible(a, b);
+
     if (gradeCompatible && this.isContiguousConnection(exact)) {
       return { connection: exact, connected: true, clusteredJunction: false };
     }
+
     const junction = closestCompatibleTrackBuilderJunction(
       a,
       b,
       coordinate => {
         const point = this.options.map.project(coordinate as [number, number]);
+
         return [point.x, point.y];
       },
-      geographicDistanceMeters,
+      (a, b) => DistanceCalculator.haversineDistanceMeters(a[1], a[0], b[1], b[0]),
       JUNCTION_MAX_SCREEN_DISTANCE_PIXELS,
       JUNCTION_MAX_GEOGRAPHIC_DISTANCE_METERS,
       this.options.config.respectGradeSeparation,
     );
+
     return junction
       ? { connection: junction, connected: true, clusteredJunction: true }
       : { connection: exact, connected: false, clusteredJunction: false };
@@ -3073,28 +3198,33 @@ export class TrackBuilderController {
     const exact = this.coordinateLineConnection(anchor, candidateCoordinates);
     const gradeCompatible = !this.options.config.respectGradeSeparation
       || areTrackBuilderJunctionSectionsCompatible(source, candidate);
+
     if (gradeCompatible && this.isContiguousConnection(exact)) {
       return { ...exact, connected: true, clusteredJunction: false };
     }
+
     const junction = closestCompatibleTrackBuilderJunction(
       source,
       candidate,
       coordinate => {
         const point = this.options.map.project(coordinate as [number, number]);
+
         return [point.x, point.y];
       },
-      geographicDistanceMeters,
+      (a, b) => DistanceCalculator.haversineDistanceMeters(a[1], a[0], b[1], b[0]),
       JUNCTION_MAX_SCREEN_DISTANCE_PIXELS,
       JUNCTION_MAX_GEOGRAPHIC_DISTANCE_METERS,
       this.options.config.respectGradeSeparation,
     );
+
     if (junction) {
       const sourceCoordinates = source.sourceCoordinates ?? source.coordinates;
       const sourceJunction = interpolateLine(sourceCoordinates, junction.a);
       const anchorPoint = this.options.map.project(anchor as [number, number]);
       const junctionPoint = this.options.map.project(sourceJunction as [number, number]);
       const anchorScreenDistance = Math.hypot(anchorPoint.x - junctionPoint.x, anchorPoint.y - junctionPoint.y);
-      const anchorGeographicDistance = geographicDistanceMeters(anchor, sourceJunction);
+      const anchorGeographicDistance = DistanceCalculator.haversineDistanceMeters(anchor[1], anchor[0], sourceJunction[1], sourceJunction[0]);
+
       if (anchorScreenDistance <= JUNCTION_MAX_SCREEN_DISTANCE_PIXELS
         && anchorGeographicDistance <= JUNCTION_MAX_GEOGRAPHIC_DISTANCE_METERS) {
         return {
@@ -3106,66 +3236,77 @@ export class TrackBuilderController {
         };
       }
     }
+
     return { ...exact, connected: false, clusteredJunction: false };
   }
 
   private renderHandleMarkers(sections: readonly TrackBuilderSection[]): void {
     this.clearHandleMarkers();
+
     if (this.direct) {
       for (const anchor of this.directEndpointAnchors()) this.handleMarkers.push(this.createDirectEndpointMarker(anchor));
+
       return;
     }
+
     if (this.snapping && this.snapSelection) {
       const selected = sections.find(section => section.id === this.snapSelection?.sectionId);
+
       if (selected) {
         this.handleMarkers.push(this.createRangeMarker(selected, this.snapSelection, 'start', 'snap'));
         this.handleMarkers.push(this.createRangeMarker(selected, this.snapSelection, 'end', 'snap'));
       }
+
       return;
     }
+
     if (this.deleting && this.deleteSelections.length > 0) {
       for (const selection of this.deleteSelections) {
         const selected = sections.find(section => section.id === selection.sectionId);
+
         if (!selected) continue;
         this.handleMarkers.push(this.createRangeMarker(selected, selection, 'start', 'delete'));
         this.handleMarkers.push(this.createRangeMarker(selected, selection, 'end', 'delete'));
       }
+
       return;
     }
+
     const first = sections[0];
     const last = sections[sections.length - 1];
+
     if (first?.sourceCoordinates && first.startPosition) this.handleMarkers.push(this.createEndpointMarker(first, 'start'));
     if (last?.sourceCoordinates && last.endPosition) this.handleMarkers.push(this.createEndpointMarker(last, 'end'));
   }
 
   private createDirectEndpointMarker(anchor: DirectEndpointAnchor): maplibregl.Marker {
     const element = this.options.container.createEl('button');
+
     element.className = `places-track-builder-handle is-${anchor.endpoint ?? 'leaf'} is-direct`;
     element.type = 'button';
     const selected = this.directAnchor && 'id' in this.directAnchor && this.directAnchor.id === anchor.id;
+
     element.classList.toggle('is-selected', Boolean(selected));
     element.setAttribute('aria-label', selected ? 'Selected direct-line endpoint' : 'Use as direct-line endpoint');
     element.addEventListener('click', event => {
       event.preventDefault();
       event.stopPropagation();
+
       if (!this.directAnchor) this.selectDirectAnchor(anchor);
       else this.commitDirectLine(anchor.coordinate, anchor);
     });
+
     return new this.options.Marker({ element, anchor: 'center' })
       .setLngLat(anchor.coordinate as [number, number])
       .addTo(this.options.map);
   }
 
-  private createRangeMarker(
-    section: TrackBuilderSection,
-    selection: DeleteSelection,
-    boundary: 'start' | 'end',
-    action: 'delete' | 'snap',
-  ): maplibregl.Marker {
+  private createRangeMarker(section: TrackBuilderSection, selection: DeleteSelection, boundary: 'start' | 'end', action: 'delete' | 'snap'): maplibregl.Marker {
     const sourceCoordinates = section.sourceCoordinates ?? section.coordinates;
     const position = selection[boundary];
     const initialCoordinate = interpolateLine(sourceCoordinates, position);
     const element = this.options.container.createDiv();
+
     element.className = `places-track-builder-handle is-${action} is-${action}-${boundary}`;
     element.setAttribute('aria-label', `Drag ${boundary} of portion to ${action}`);
     const marker = new this.options.Marker({ element, draggable: true, anchor: 'center' })
@@ -3176,24 +3317,31 @@ export class TrackBuilderController {
     let previousDragPoint = this.options.map.project(initialCoordinate as [number, number]);
     let previousSnapPosition = position;
     let draggedSnapRanges: TrackBuilderRange[] = [];
+
     marker.on('dragstart', () => {
       if (action === 'snap') {
         const snapSelection = selection as SnapSelection;
+
         projectedSource = sourceCoordinates.map(coordinate => {
           const point = this.options.map.project(coordinate as [number, number]);
+
           return [point.x, point.y] as TrackBuilderSelectionPoint;
         });
         projectedOffsets = [0];
+
         for (let index = 1; index < projectedSource.length; index++) {
           const previous = projectedSource[index - 1];
           const current = projectedSource[index];
+
           projectedOffsets.push(projectedOffsets[index - 1] + Math.hypot(current[0] - previous[0], current[1] - previous[1]));
         }
+
         previousDragPoint = this.options.map.project(marker.getLngLat());
         previousSnapPosition = selection[boundary];
         draggedSnapRanges = snapSelection.ranges.map(range => ({ ...range }));
         this.updateSnapSelectionDisplay('Release the boundary to update the preview.');
       }
+
       logger.scope('TrackBuilder').debug(`${action} boundary drag started`, {
         draftKey: this.key,
         boundary,
@@ -3205,14 +3353,18 @@ export class TrackBuilderController {
       const stillSelected = action === 'delete'
         ? this.deleteSelections.includes(selection)
         : this.snapSelection === selection;
+
       if (!stillSelected) return;
       const pointer = this.options.map.project(marker.getLngLat());
+
       if (action === 'delete') {
         const projected = this.positionOnLine(pointer, sourceCoordinates, selection[boundary]);
         const clamped = this.clampPositionToSection(projected, section);
+
         selection[boundary] = clamped;
         marker.setLngLat(interpolateLine(sourceCoordinates, clamped) as [number, number]);
         this.updateDeletePreview();
+
         return;
       }
 
@@ -3220,6 +3372,7 @@ export class TrackBuilderController {
       const distance = Math.hypot(pointer.x - previousDragPoint.x, pointer.y - previousDragPoint.y);
       const sampleCount = Math.max(1, Math.ceil(distance / 4));
       let sampleStart: TrackBuilderSelectionPoint = [previousDragPoint.x, previousDragPoint.y];
+
       for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex++) {
         const fraction = sampleIndex / sampleCount;
         const sample: TrackBuilderSelectionPoint = [
@@ -3234,19 +3387,24 @@ export class TrackBuilderController {
         const currentScreen = this.projectedPositionPoint(projectedSource, clamped);
         const directScreenPixels = Math.hypot(currentScreen[0] - previousScreen[0], currentScreen[1] - previousScreen[1]);
         const pointerStepPixels = Math.hypot(sample[0] - sampleStart[0], sample[1] - sampleStart[1]);
+
         if (shouldSplitTrackBuilderGesture(sourceArcPixels, directScreenPixels, pointerStepPixels)) {
           const range = { start: clamped, end: clamped };
+
           if (boundary === 'end') draggedSnapRanges.push(range);
           else draggedSnapRanges.unshift(range);
         } else {
           const activeRange = boundary === 'end'
             ? draggedSnapRanges[draggedSnapRanges.length - 1]
             : draggedSnapRanges[0];
+
           if (activeRange) activeRange[boundary] = clamped;
         }
+
         previousSnapPosition = clamped;
         sampleStart = sample;
       }
+
       selection[boundary] = previousSnapPosition;
       snapSelection.ranges = draggedSnapRanges;
       previousDragPoint = pointer;
@@ -3257,6 +3415,7 @@ export class TrackBuilderController {
       const stillSelected = action === 'delete'
         ? this.deleteSelections.includes(selection)
         : this.snapSelection === selection;
+
       if (!stillSelected) return;
       if (action === 'snap') this.normalizeSnapSelection(section, selection as SnapSelection);
       logger.scope('TrackBuilder').debug(`${action} boundary adjusted`, {
@@ -3265,35 +3424,33 @@ export class TrackBuilderController {
         sectionId: section.id,
         selection,
       });
+
       if (action === 'delete') this.updateDeletePreview();
       else this.updateSnapPreview();
     });
+
     return marker;
   }
 
-  private projectedPositionOffset(
-    points: readonly TrackBuilderSelectionPoint[],
-    offsets: readonly number[],
-    position: TrackBuilderLinePosition,
-  ): number {
+  private projectedPositionOffset(points: readonly TrackBuilderSelectionPoint[], offsets: readonly number[], position: TrackBuilderLinePosition): number {
     const index = Math.max(0, Math.min(points.length - 2, position.segmentIndex));
     const a = points[index];
     const b = points[index + 1];
+
     return offsets[index] + Math.hypot(b[0] - a[0], b[1] - a[1]) * position.t;
   }
 
-  private projectedPositionPoint(
-    points: readonly TrackBuilderSelectionPoint[],
-    position: TrackBuilderLinePosition,
-  ): TrackBuilderSelectionPoint {
+  private projectedPositionPoint(points: readonly TrackBuilderSelectionPoint[], position: TrackBuilderLinePosition): TrackBuilderSelectionPoint {
     const index = Math.max(0, Math.min(points.length - 2, position.segmentIndex));
     const a = points[index];
     const b = points[index + 1];
+
     return [a[0] + (b[0] - a[0]) * position.t, a[1] + (b[1] - a[1]) * position.t];
   }
 
   private createEndpointMarker(section: TrackBuilderSection, endpoint: 'start' | 'end'): maplibregl.Marker {
     const element = this.options.container.createDiv();
+
     element.className = `places-track-builder-handle is-${endpoint}`;
     element.setAttribute('aria-label', `Drag ${endpoint} of selected section`);
     const initialCoordinate = endpoint === 'start'
@@ -3309,9 +3466,10 @@ export class TrackBuilderController {
     let lastEquivalentSourceCandidate = '';
     let previousDragPoint = this.options.map.project(initialCoordinate as [number, number]);
     let dragCandidateIndex: SnapCandidateIndex | undefined;
-    let cancelled = false;
+    let canceled = false;
+
     marker.on('dragstart', () => {
-      cancelled = false;
+      canceled = false;
       trace = [];
       lastTraceCoordinate = undefined;
       lastRejectedTransition = '';
@@ -3325,24 +3483,26 @@ export class TrackBuilderController {
         section: sectionLogData(section),
         indexedCandidates: dragCandidateIndex.candidates.length,
       });
+
       this.cancelActiveDrag = () => {
-        cancelled = true;
+        canceled = true;
         trace = [];
         marker.setLngLat(initialCoordinate as [number, number]);
         this.setSourceData(HOVER_SOURCE, []);
         this.setSourceData(DRAFT_SOURCE, getTrackBuilderHistory(this.key).draft.sections);
-        this.status.setText('Drag cancelled');
-        logger.scope('TrackBuilder').debug('endpoint drag cancelled', { draftKey: this.key, endpoint, sectionId: section.id });
+        this.status.setText('Drag canceled');
+        logger.scope('TrackBuilder').debug('endpoint drag canceled', { draftKey: this.key, endpoint, sectionId: section.id });
       };
     });
     marker.on('drag', () => {
-      if (cancelled) return;
+      if (canceled) return;
       const rawLngLat = marker.getLngLat();
       const rawCoordinate: TrackBuilderCoordinate = [rawLngLat.lng, rawLngLat.lat];
       const dragPoint = this.options.map.project(rawLngLat);
       const distance = Math.hypot(dragPoint.x - previousDragPoint.x, dragPoint.y - previousDragPoint.y);
       const sampleCount = Math.max(1, Math.min(100, Math.ceil(distance / 3)));
       let returnedToSource: TrackBuilderLinePosition | undefined;
+
       for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex++) {
         const fraction = sampleIndex / sampleCount;
         const samplePoint = {
@@ -3350,12 +3510,14 @@ export class TrackBuilderController {
           y: previousDragPoint.y + (dragPoint.y - previousDragPoint.y) * fraction,
         } as maplibregl.Point;
         const candidate = this.findCandidateAt(samplePoint, trace[trace.length - 1]?.candidate, 8, dragCandidateIndex);
+
         if (candidate) {
           const candidateCoordinates = candidate.sourceCoordinates ?? candidate.coordinates;
           const candidatePosition = this.positionOnLine(samplePoint, candidateCoordinates);
           const candidateCoordinate = interpolateLine(candidateCoordinates, candidatePosition);
           const sourceConnection = this.coordinateLineConnection(candidateCoordinate, section.sourceCoordinates!);
           const matchingIdentity = this.isSectionSource(candidate, section);
+
           if (shouldTrimEndpointToCurrentSource(
             matchingIdentity,
             sourceConnection.screenDistancePixels,
@@ -3363,13 +3525,11 @@ export class TrackBuilderController {
             CONTIGUOUS_MAX_SCREEN_DISTANCE_PIXELS,
             CONTIGUOUS_MAX_GEOGRAPHIC_DISTANCE_METERS,
           )) {
-            // Vector tiles can return the same physical path with a different ID after zooming
-            // or crossing a tile boundary. Its projected source position is still a trim. Keeping
-            // the trace instead lets dragend append the retraced path and preserve the tail.
             returnedToSource = sourceConnection.position;
             trace = [];
             lastTraceCoordinate = undefined;
             lastRejectedTransition = '';
+
             if (!matchingIdentity && lastEquivalentSourceCandidate !== candidate.id) {
               lastEquivalentSourceCandidate = candidate.id;
               logger.scope('TrackBuilder').debug('endpoint drag matched equivalent source geometry', {
@@ -3381,14 +3541,18 @@ export class TrackBuilderController {
                 ...sourceConnection,
               });
             }
+
             continue;
           }
         }
+
         const tracing = trace.length > 0 || Boolean(candidate);
+
         if (!candidate || !tracing) continue;
         returnedToSource = undefined;
         let position = this.positionOnLine(samplePoint, candidate.sourceCoordinates ?? candidate.coordinates);
         const last = trace[trace.length - 1];
+
         if (last?.candidate.id === candidate.id) {
           last.end = position;
           lastTraceCoordinate = interpolateLine(candidate.sourceCoordinates ?? candidate.coordinates, position);
@@ -3398,8 +3562,10 @@ export class TrackBuilderController {
             ? this.resolveSectionConnection(last.candidate, candidate)
             : this.resolveSectionAnchorConnection(initialCoordinate, section, candidate);
           const connection = 'connection' in resolution ? resolution.connection : resolution;
+
           if (!resolution.connected) {
             const transition = `${last?.candidate.id ?? section.id}:${candidate.id}`;
+
             if (transition !== lastRejectedTransition) {
               lastRejectedTransition = transition;
               logger.scope('TrackBuilder').debug('drag candidate rejected as disconnected', {
@@ -3410,15 +3576,19 @@ export class TrackBuilderController {
                 ...connection,
               });
             }
+
             continue;
           }
+
           if (resolution.clusteredJunction) {
             position = 'connection' in resolution ? resolution.connection.b : resolution.position;
           }
+
           lastRejectedTransition = '';
           trace.push({ candidate, start: position, end: position });
           lastTraceCoordinate = interpolateLine(candidateCoordinates, position);
           const sampledPointer = this.options.map.unproject(samplePoint);
+
           logger.scope('TrackBuilder').debug('drag entered feature', {
             draftKey: this.key,
             endpoint,
@@ -3433,23 +3603,32 @@ export class TrackBuilderController {
           });
         }
       }
+
       previousDragPoint = dragPoint;
+
       if (returnedToSource) {
         preview = this.endpointPreview(section, endpoint, returnedToSource);
         const sections = getTrackBuilderHistory(this.key).draft.sections.map(current => current.id === section.id ? preview : current);
+
         this.setSourceData(DRAFT_SOURCE, sections);
         marker.setLngLat((endpoint === 'start' ? preview.coordinates[0] : preview.coordinates[preview.coordinates.length - 1]) as [number, number]);
         this.setSourceData(HOVER_SOURCE, []);
+
         return;
       }
+
       if (trace.length > 0 && lastTraceCoordinate) {
         marker.setLngLat(lastTraceCoordinate as [number, number]);
         this.setSourceData(HOVER_SOURCE, this.buildTraceSections(trace, section, endpoint));
+
         return;
       }
+
       const position = this.positionOnLine(this.options.map.project(marker.getLngLat()), section.sourceCoordinates!);
+
       preview = this.endpointPreview(section, endpoint, position);
       const sections = getTrackBuilderHistory(this.key).draft.sections.map(current => current.id === section.id ? preview : current);
+
       this.setSourceData(DRAFT_SOURCE, sections);
       marker.setLngLat((endpoint === 'start' ? preview.coordinates[0] : preview.coordinates[preview.coordinates.length - 1]) as [number, number]);
     });
@@ -3457,10 +3636,12 @@ export class TrackBuilderController {
       this.cancelActiveDrag = undefined;
       dragCandidateIndex = undefined;
       this.setSourceData(HOVER_SOURCE, []);
-      if (cancelled) {
+
+      if (canceled) {
         this.setSourceData(DRAFT_SOURCE, getTrackBuilderHistory(this.key).draft.sections);
       } else if (trace.length > 0) {
         const added = this.buildTraceSections(trace, section, endpoint, true);
+
         logger.scope('TrackBuilder').debug('endpoint drag committed', {
           draftKey: this.key,
           endpoint,
@@ -3468,6 +3649,7 @@ export class TrackBuilderController {
           trace: trace.map(run => ({ candidate: sectionLogData(run.candidate), start: run.start, end: run.end })),
           committedSections: added.map(sectionLogData),
         });
+
         if (endpoint === 'end') appendTrackBuilderSections(this.key, added);
         else prependTrackBuilderSections(this.key, added);
       } else {
@@ -3479,13 +3661,16 @@ export class TrackBuilderController {
         });
         replaceTrackBuilderSection(this.key, preview);
       }
+
       this.render();
     });
+
     return marker;
   }
 
   private isSectionSource(candidate: TrackBuilderSection, section: TrackBuilderSection): boolean {
     if (candidate.id === section.sourceFeatureKey) return true;
+
     return candidate.featureId !== undefined
       && section.featureId !== undefined
       && candidate.featureId === section.featureId
@@ -3497,7 +3682,9 @@ export class TrackBuilderController {
       ? sliceLine(section.sourceCoordinates!, position, section.endPosition!)
       : sliceLine(section.sourceCoordinates!, section.startPosition!, position);
     const snap = this.findEndpointSnap(endpoint === 'start' ? coordinates[0] : coordinates[coordinates.length - 1], section.id);
+
     if (snap) coordinates[endpoint === 'start' ? 0 : coordinates.length - 1] = snap;
+
     return endpoint === 'start'
       ? { ...section, startPosition: position, startCoordinateOverride: snap, coordinates }
       : { ...section, endPosition: position, endCoordinateOverride: snap, coordinates };
@@ -3518,6 +3705,7 @@ export class TrackBuilderController {
     const contiguousTrace = connectedTracePrefix(repairedTrace.runs, isConnected);
     let resolvedTrace = contiguousTrace.runs;
     const sampledTrace = resolvedTrace.map(run => ({ start: run.start, end: run.end }));
+
     if (logResolution) {
       for (const inferred of repairedTrace.inferred) logger.scope('TrackBuilder').debug('trace backtrack inferred', {
         draftKey: this.key,
@@ -3525,6 +3713,7 @@ export class TrackBuilderController {
         repeatedFeatureKey: inferred.repeatedKey,
         insertedFeatureKeys: inferred.insertedKeys,
       });
+
       if (contiguousTrace.rejected) logger.scope('TrackBuilder').debug('trace truncated at disconnected transition', {
         draftKey: this.key,
         endpoint,
@@ -3533,15 +3722,18 @@ export class TrackBuilderController {
         to: contiguousTrace.rejected.to.id,
       });
     }
+
     const sourceAnchor = sourceAnchorOverride
       ?? (endpoint === 'end' ? section.coordinates[section.coordinates.length - 1] : section.coordinates[0]);
     const first = resolvedTrace[0];
+
     if (first && !preserveRunBounds) {
       const firstCoordinates = first.candidate.sourceCoordinates ?? first.candidate.coordinates;
       const exactAnchorConnection = this.coordinateLineConnection(sourceAnchor, firstCoordinates);
       const anchorResolution = this.resolveSectionAnchorConnection(sourceAnchor, section, first.candidate);
       const anchorPosition = anchorResolution.position;
       const sameSourceFeature = first.candidate.featureId === section.featureId && first.candidate.sourceLayer === section.sourceLayer;
+
       if (sameSourceFeature) first.start = exactAnchorConnection.position;
       else if (anchorResolution.connected) first.start = anchorPosition;
       else if (!allowDetachedSourceAnchor) {
@@ -3552,6 +3744,7 @@ export class TrackBuilderController {
           firstFeatureKey: first.candidate.id,
           ...anchorResolution,
         });
+
         resolvedTrace = [];
       } else if (logResolution) {
         logger.scope('TrackBuilder').debug('map snap retained feature position away from GPX source anchor', {
@@ -3563,15 +3756,18 @@ export class TrackBuilderController {
         });
       }
     }
+
     for (let index = 1; !preserveRunBounds && index < resolvedTrace.length; index++) {
       const previous = resolvedTrace[index - 1];
       const current = resolvedTrace[index];
       const resolution = this.resolveSectionConnection(previous.candidate, current.candidate);
       const connection = resolution.connection;
+
       if (resolution.connected) {
         previous.end = connection.a;
         current.start = connection.b;
       }
+
       if (logResolution) logger.scope('TrackBuilder').debug('trace feature junction resolved', {
         draftKey: this.key,
         from: previous.candidate.id,
@@ -3581,13 +3777,16 @@ export class TrackBuilderController {
         clusteredJunction: resolution.clusteredJunction,
       });
     }
+
     if (!preserveRunBounds) resolvedTrace = resolvedTrace.flatMap((run, index) => {
       const coordinates = run.candidate.sourceCoordinates ?? run.candidate.coordinates;
       const distance = (a: TrackBuilderLinePosition, b: TrackBuilderLinePosition): number => {
         const aPoint = this.options.map.project(interpolateLine(coordinates, a) as [number, number]);
         const bPoint = this.options.map.project(interpolateLine(coordinates, b) as [number, number]);
+
         return Math.hypot(aPoint.x - bPoint.x, aPoint.y - bPoint.y);
       };
+
       return resolveCenterBasedTraceRun(
         { ...run, start: sampledTrace[index].start, end: sampledTrace[index].end },
         run.start,
@@ -3595,16 +3794,20 @@ export class TrackBuilderController {
         distance,
       );
     });
+
     const outward: TrackBuilderSection[] = [];
     let anchor = sourceAnchor;
+
     for (const run of resolvedTrace) {
       let added = this.sectionBetween(run.candidate, run.start, run.end);
+
       if (coordinateDistanceSquared(anchor, added.coordinates[0]) > coordinateDistanceSquared(anchor, added.coordinates[added.coordinates.length - 1])) added = reverseTrackBuilderSection(added);
       const coordinates = [...added.coordinates];
       const startPoint = this.options.map.project(coordinates[0] as [number, number]);
       const anchorPoint = this.options.map.project(anchor as [number, number]);
       const shouldSnap = Math.hypot(startPoint.x - anchorPoint.x, startPoint.y - anchorPoint.y) <= 14
-        && geographicDistanceMeters(coordinates[0], anchor) <= 5;
+        && DistanceCalculator.haversineDistanceMeters(coordinates[0][1], coordinates[0][0], anchor[1], anchor[0]) <= 5;
+
       if (logResolution) {
         logger.scope('TrackBuilder').debug('trace run resolved', {
           draftKey: this.key,
@@ -3616,33 +3819,40 @@ export class TrackBuilderController {
           orientedEnd: coordinates[coordinates.length - 1],
           anchor,
           screenDistancePixels: Math.hypot(startPoint.x - anchorPoint.x, startPoint.y - anchorPoint.y),
-          geographicDistanceMeters: geographicDistanceMeters(coordinates[0], anchor),
+          geographicDistanceMeters: DistanceCalculator.haversineDistanceMeters(coordinates[0][1], coordinates[0][0], anchor[1], anchor[0]),
           snapped: shouldSnap,
         });
       }
+
       if (shouldSnap) coordinates[0] = anchor;
       added = { ...added, coordinates, startCoordinateOverride: shouldSnap ? anchor : undefined };
       outward.push(added);
       anchor = coordinates[coordinates.length - 1];
     }
+
     if (endpoint === 'end') return outward;
+
     return outward.reverse().map(added => reverseTrackBuilderSection(added));
   }
 
   private findEndpointSnap(coordinate: TrackBuilderCoordinate, excludedSectionId: string): TrackBuilderCoordinate | undefined {
     const point = this.options.map.project(coordinate as [number, number]);
     let best: { coordinate: TrackBuilderCoordinate; distance: number } | undefined;
+
     for (const section of getTrackBuilderHistory(this.key).draft.sections) {
       if (section.id === excludedSectionId || section.coordinates.length === 0) continue;
       const endpoints = [section.coordinates[0], section.coordinates[section.coordinates.length - 1]];
+
       for (const candidate of endpoints) {
         const projected = this.options.map.project(candidate as [number, number]);
         const distance = Math.hypot(point.x - projected.x, point.y - projected.y);
-        if (distance <= 14 && geographicDistanceMeters(coordinate, candidate) <= 5 && (!best || distance < best.distance)) {
+
+        if (distance <= 14 && DistanceCalculator.haversineDistanceMeters(coordinate[1], coordinate[0], candidate[1], candidate[0]) <= 5 && (!best || distance < best.distance)) {
           best = { coordinate: candidate, distance };
         }
       }
     }
+
     return best?.coordinate;
   }
 
@@ -3656,6 +3866,7 @@ export class TrackBuilderController {
   // modes rely on.
   private renderWaypointMarkers(waypoints: readonly TrackBuilderWaypoint[]): void {
     this.clearWaypointMarkers();
+
     for (const waypoint of waypoints) {
       this.waypointMarkers.push({ id: waypoint.id, marker: this.createWaypointMarker(waypoint) });
     }
@@ -3674,8 +3885,10 @@ export class TrackBuilderController {
     for (const entry of this.waypointMarkers) {
       entry.marker.getElement().classList.toggle('is-selected', entry.id === this.selectedWaypointId);
     }
+
     if (this.waypointActions) this.waypointActions.hidden = !this.waypointing || !this.selectedWaypointId;
     const selected = this.selectedWaypoint();
+
     this.status.setText(selected
       ? `Waypoint · ${selected.name ?? 'unnamed'}`
       : `Waypoints · ${trackBuilderWaypoints(getTrackBuilderHistory(this.key).draft).length} placed`);
@@ -3683,14 +3896,13 @@ export class TrackBuilderController {
 
   private createWaypointMarker(waypoint: TrackBuilderWaypoint): maplibregl.Marker {
     const element = this.options.container.createDiv();
+
     element.className = 'places-track-builder-waypoint-marker';
     element.classList.toggle('is-selected', this.selectedWaypointId === waypoint.id);
     element.classList.toggle('is-interactive', this.waypointing);
-    // A sym value is free text in GPX: emoji render as the icon, and any other
-    // value (Summit, Trailhead) keeps a generic pin, leaving the label legible.
-    const symbol = waypoint.symbol?.trim();
-    element.setText(symbol && !/[A-Za-z0-9]/.test(symbol) ? symbol : '📍');
+    element.setText(resolveWaypointIcon(waypoint) ?? '📍');
     const label = waypoint.name ?? 'Unnamed waypoint';
+
     element.setAttribute('aria-label', label);
     element.setAttribute('title', waypoint.description ? `${label} - ${waypoint.description}` : label);
 
@@ -3713,20 +3925,23 @@ export class TrackBuilderController {
       .setLngLat(waypoint.coordinate as [number, number])
       .addTo(this.options.map);
 
-    let cancelled = false;
+    let canceled = false;
+
     marker.on('dragstart', () => {
-      cancelled = false;
+      canceled = false;
       this.selectedWaypointId = waypoint.id;
+
       this.cancelActiveDrag = () => {
-        cancelled = true;
+        canceled = true;
         marker.setLngLat(waypoint.coordinate as [number, number]);
-        this.status.setText('Drag cancelled');
+        this.status.setText('Drag canceled');
       };
     });
     marker.on('dragend', () => {
       this.cancelActiveDrag = undefined;
-      if (cancelled) return;
+      if (canceled) return;
       const lngLat = marker.getLngLat();
+
       updateTrackBuilderWaypoint(this.key, { ...waypoint, coordinate: [lngLat.lng, lngLat.lat] });
       logger.scope('TrackBuilder').debug('waypoint moved', {
         draftKey: this.key,
@@ -3736,12 +3951,14 @@ export class TrackBuilderController {
       });
       this.render();
     });
+
     return marker;
   }
 
   private setSourceData(sourceId: string, sections: readonly TrackBuilderSection[], action?: 'delete' | 'snap' | 'new-piece'): void {
     const source = this.options.map.getSource<maplibregl.GeoJSONSource>(sourceId);
-    source?.setData({
+
+    void source?.setData({
       type: 'FeatureCollection',
       features: sections.map(section => ({
         type: 'Feature',
@@ -3757,54 +3974,59 @@ export class TrackBuilderController {
 
   private handleKeyDown(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
-    if ((!this.active && !this.deleting && !this.direct && !this.snapping && !this.waypointing)
+
+    if (this.mode === 'idle'
       || target?.instanceOf(HTMLInputElement)
       || target?.instanceOf(HTMLTextAreaElement)
       || target?.instanceOf(HTMLSelectElement)) return;
+
     if (event.key === 'Escape' && this.cancelActiveDrag) {
       event.preventDefault();
       event.stopPropagation();
       this.cancelActiveDrag();
+
       return;
     }
+
     const modifier = event.metaKey || event.ctrlKey;
+
     if (modifier && event.key.toLowerCase() === 'z') {
       event.preventDefault();
+
       if (event.shiftKey) redoTrackBuilderEdit(this.key);
       else undoTrackBuilderEdit(this.key);
+
       this.render();
     } else if (modifier && event.key.toLowerCase() === 'y') {
       event.preventDefault(); redoTrackBuilderEdit(this.key); this.render();
     } else if (event.key === 'Backspace' || event.key === 'Delete') {
       event.preventDefault();
+
       if (this.deleting && this.deleteSelections.length > 0) this.applyDeleteSelection();
       else if (this.snapping && this.snapSelection) this.clearSnapSelection();
       else if (this.waypointing && this.selectedWaypointId) this.deleteSelectedWaypoint();
-      // Waypoint mode never falls through to removing a section.
       else if (!this.waypointing) { removeLastTrackBuilderSection(this.key); this.render(); }
     } else if (event.key === 'Escape') {
       if (this.deleting && this.deleteSelections.length > 0) this.clearDeleteSelection();
       else if (this.waypointing && this.selectedWaypointId) { this.selectedWaypointId = undefined; this.render(); }
-      else if (this.waypointing) this.setWaypointing(false);
       else if (this.snapping && this.snapSelection) this.clearSnapSelection();
       else if (this.direct && this.directAnchor) {
         this.directAnchor = undefined;
         this.setSourceData(DIRECT_PREVIEW_SOURCE, []);
         this.render();
-      } else if (this.direct) this.setDirect(false);
-      else if (this.snapping) this.setSnapping(false);
-      else if (this.deleting) this.setDeleting(false);
-      else this.setActive(false);
+      } else this.setMode('idle');
     }
   }
 
   private async exportGpx(): Promise<void> {
     const draft = getTrackBuilderHistory(this.key).draft;
+
     if (draft.sections.length === 0) return;
     const name = this.options.config.name ?? this.importedName ?? this.options.config.id ?? 'Places track';
     // One sanitizer: the GPX export and the track note derive the same stem
     // from one name.
     const filename = `${Utilities.sanitizeFilename(name) || 'places-track'}.gpx`;
+
     logger.scope('TrackBuilder').debug('GPX export requested', {
       draftKey: this.key,
       configuredName: this.options.config.name,
@@ -3814,76 +4036,51 @@ export class TrackBuilderController {
       sections: draft.sections.map(sectionLogData),
       segments: trackBuilderSegments(draft),
     });
+
     await downloadOrCopy({ app: this.options.app, content: serializeTrackBuilderGpx(draft, name), filename, mimeType: 'application/gpx+xml', vaultFallbackFolder: PLACES_EXPORTS_FOLDER });
   }
 
   private async createTrackNote(): Promise<void> {
+    const host = this.options.placeNoteHost;
     const draft = getTrackBuilderHistory(this.key).draft;
-    if (draft.sections.length === 0) return;
+
+    if (!host || draft.sections.length === 0) return;
     const name = this.options.config.name ?? this.importedName ?? this.options.config.id ?? 'Places track';
-    const gpx = serializeTrackBuilderGpx(draft, name);
     const segments = trackBuilderSegments(draft);
     const firstCoordinate = segments[0]?.[0];
-    const pointCount = segments.reduce((total, segment) => total + segment.length, 0);
 
-    try {
-      const file = await createOverlayNote(this.options.app, {
-        name,
-        sourcePath: this.options.source.path,
-        frontmatter: {
-          // The shared schema decides which fields a track note carries.
-          // Distances are summed per section: joining them end-to-end would
-          // invent the gaps between.
-          ...buildTrackNoteFrontmatter({
-            distanceKm: km(segments.reduce((total, segment) => total + DistanceCalculator.calculatePolylineDistanceKm(segment.map(coordinateFromPosition)), 0)),
-            startCoordinate: firstCoordinate ? coordinateFromPosition(firstCoordinate) : undefined,
-            totalPoints: pointCount,
-            name,
-            featureCount: segments.length,
-          }, this.options.units),
-          'Overlay Source': StringCompressor.compressAndEncode(gpx),
-        },
-      });
-      logger.scope('TrackBuilder').debug('track note created', {
-        draftKey: this.key,
-        path: file.path,
-        name,
-        pointCount,
-        segmentCount: segments.length,
-      });
-      new Notice(`Created track note: ${file.path}`);
-      await this.options.app.workspace.getLeaf().openFile(file);
-      this.status.setText('Track note created');
-      this.status.title = file.path;
-    } catch (error) {
-      const message = getErrorMessage(error);
-      logger.scope('TrackBuilder').error('track note creation failed', {
-        draftKey: this.key,
-        name,
-        error: message,
-      });
-      new Notice(`Could not create track note: ${message}`);
-      this.status.setText('Track note creation failed');
-      this.status.title = message;
-    }
+    await host.createNote({
+      kind: 'track', name, sourcePath: this.options.source.path,
+      gpx: serializeTrackBuilderGpx(draft, name),
+      metrics: {
+        distanceKm: km(segments.reduce((total, segment) => total + DistanceCalculator.calculatePolylineDistanceKm(segment.map(coordinateFromPosition)), 0)),
+        startCoordinate: firstCoordinate ? coordinateFromPosition(firstCoordinate) : undefined,
+        totalPoints: segments.reduce((total, segment) => total + segment.length, 0),
+        name, featureCount: segments.length,
+      },
+    });
   }
 
   private async loadConfiguredTracks(trackSettings: readonly string[]): Promise<void> {
     try {
       const loader = this.options.trackLoader;
+
       if (!loader) throw new Error('The standard Places track loader is unavailable.');
       const statePath = JSON.stringify(trackSettings.map(value => value.trim()));
       const prior = configuredTrackStates().get(this.key);
+
       this.importedName = prior?.path === statePath ? prior.name : undefined;
       if (prior?.path === statePath) return;
 
       const tracks: TrackData[] = [];
+
       for (const trackSetting of trackSettings) {
         // TrackBuilder edits and re-exports the recording, and prefers the original
         // Overlay Source over a geometry-only Overlay Cache. The latter omits
         // timestamps and would silently discard recording data.
         tracks.push(await loader.loadTrackFromPath(trackSetting, this.options.source.path ?? '', { skipCache: true }));
       }
+
       if (this.destroyed) return;
       const sections = tracks.flatMap((track, trackIndex) =>
         trackDataToTrackBuilderSections(track).map((section, sectionIndex) => ({
@@ -3895,11 +4092,13 @@ export class TrackBuilderController {
       // One undoable edit: a single undo restores the pre-load draft.
       const loadedWaypoints = tracks.flatMap((track, trackIndex) =>
         trackDataToTrackBuilderWaypoints(track).map(waypoint => ({ ...waypoint, id: `${waypoint.id}:${trackIndex}` })));
+
       // A GPX of marks with no recorded line is a valid starting point. Only a
       // load that produced neither geometry nor waypoints is an error.
       if (sections.length === 0 && loadedWaypoints.length === 0) {
         throw new Error('The track has no segment with at least two points, and no waypoints.');
       }
+
       replaceTrackBuilderContent(this.key, sections, loadedWaypoints);
       this.importedName = tracks.length === 1
         ? tracks[0].metadata.name ?? configuredTrackName(trackSettings[0])
@@ -3915,10 +4114,12 @@ export class TrackBuilderController {
       });
     } catch (error) {
       const message = getErrorMessage(error);
+
       if (!this.destroyed) {
         this.status.setText('Track failed to load');
         this.status.setAttribute('title', message);
       }
+
       logger.scope('TrackBuilder').error('configured tracks load failed', { draftKey: this.key, trackSettings, error: message });
     }
   }
@@ -3927,8 +4128,10 @@ export class TrackBuilderController {
   private fitLoadedContent(sections: readonly TrackBuilderSection[], waypoints: readonly TrackBuilderWaypoint[]): void {
     if (sections.length > 0) {
       this.fitSections(sections);
+
       return;
     }
+
     this.fitCoordinates(waypoints.map(waypoint => waypoint.coordinate));
   }
 
@@ -3942,13 +4145,17 @@ export class TrackBuilderController {
     let east = west;
     let south = coordinates[0][1];
     let north = south;
+
     for (const [longitude, latitude] of coordinates.slice(1)) {
       west = Math.min(west, longitude);
       east = Math.max(east, longitude);
       south = Math.min(south, latitude);
       north = Math.max(north, latitude);
     }
-    this.options.map.fitBounds([[west, south], [east, north]], { padding: 40, maxZoom: 16 });
+
+    this.options.runProgrammaticCamera(() => {
+      this.options.map.fitBounds([[west, south], [east, north]], { padding: 40, maxZoom: 16, animate: false });
+    });
   }
 }
 
@@ -3956,5 +4163,6 @@ function configuredTrackName(trackSetting: string): string {
   const unquoted = trackSetting.trim().replace(/^(["'])(.*)\1$/, '$2');
   const link = unquoted.match(/^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$/)?.[1] ?? unquoted;
   const basename = link.split('/').pop() ?? link;
+
   return basename.replace(/\.(?:md|gpx|csv|geojson|json)$/i, '') || 'Places track';
 }

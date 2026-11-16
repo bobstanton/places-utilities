@@ -1,4 +1,4 @@
-import type { TrackBuilderLinePosition } from 'places-shared/map';
+import type { TrackBuilderLinePosition } from 'places-utilities/core';
 
 export interface TrackFeatureTraceRun<TCandidate> {
   readonly candidate: TCandidate;
@@ -71,15 +71,18 @@ export function clipEndpointOverlapSamples(samples: readonly TrackOverlapSample[
   if (samples.length < 2) return undefined;
 
   let firstUncovered = 0;
+
   while (firstUncovered < samples.length && samples[firstUncovered].coveredBy) firstUncovered++;
   if (firstUncovered === samples.length) return undefined;
 
   let lastUncovered = samples.length - 1;
+
   while (lastUncovered >= 0 && samples[lastUncovered].coveredBy) lastUncovered--;
   if (firstUncovered > lastUncovered) return undefined;
 
   const startCovered = firstUncovered > 0 ? samples[firstUncovered - 1] : undefined;
   const endCovered = lastUncovered < samples.length - 1 ? samples[lastUncovered + 1] : undefined;
+
   return {
     startOffset: samples[firstUncovered].offset,
     endOffset: samples[lastUncovered].offset,
@@ -100,12 +103,7 @@ export function clipEndpointOverlapSamples(samples: readonly TrackOverlapSample[
 export const TRACK_BRIDGE_MAX_DISTANCE_METERS = 65;
 
 // A short gap is safe to bridge only when it continues in roughly the same direction.
-export function shouldBridgeNearbyTrackEndpoint(
-  geographicDistanceMeters: number,
-  alignmentCosine: number,
-  maximumDistanceMeters = TRACK_BRIDGE_MAX_DISTANCE_METERS,
-  minimumAlignmentCosine = 0.5,
-): boolean {
+export function shouldBridgeNearbyTrackEndpoint(geographicDistanceMeters: number, alignmentCosine: number, maximumDistanceMeters = TRACK_BRIDGE_MAX_DISTANCE_METERS, minimumAlignmentCosine = 0.5): boolean {
   return geographicDistanceMeters <= maximumDistanceMeters && alignmentCosine >= minimumAlignmentCosine;
 }
 
@@ -141,7 +139,9 @@ export function resolveCenterBasedTraceRun<TCandidate>(
   const startDistance = distance(entry, run.start);
   const endDistance = distance(entry, run.end);
   const center = startDistance >= endDistance ? run.start : run.end;
+
   if (Math.max(startDistance, endDistance) <= minimumDistance) return [];
+
   return [
     { ...run, start: entry, end: center },
     { ...run, start: center, end: exit },
@@ -152,12 +152,7 @@ const DEFAULT_PREFERENCE_HYSTERESIS_PIXELS = 1.5;
 
 // Keep the current feature only for a near tie. This prevents adjacent or crossing features from
 // flickering without letting an eight-pixel capture radius hide a substantially closer feature.
-export function shouldKeepPreferredTrackCandidate(
-  preferredDistancePixels: number,
-  closestDistancePixels: number,
-  maximumDistancePixels: number,
-  hysteresisPixels = DEFAULT_PREFERENCE_HYSTERESIS_PIXELS,
-): boolean {
+export function shouldKeepPreferredTrackCandidate(preferredDistancePixels: number, closestDistancePixels: number, maximumDistancePixels: number, hysteresisPixels = DEFAULT_PREFERENCE_HYSTERESIS_PIXELS): boolean {
   return preferredDistancePixels <= maximumDistancePixels
     && preferredDistancePixels <= closestDistancePixels + hysteresisPixels;
 }
@@ -176,18 +171,22 @@ export function expandRepeatedFeatureBacktracks<TCandidate>(
   for (const sourceRun of runs) {
     const current = { ...sourceRun };
     const previous = expanded[expanded.length - 1];
+
     if (previous && !areConnected(previous.candidate, current.candidate)) {
       const currentKey = getKey(current.candidate);
       let repeatedIndex = -1;
+
       for (let index = expanded.length - 2; index >= 0; index--) {
         if (getKey(expanded[index].candidate) !== currentKey) continue;
         let connectedPath = true;
+
         for (let pathIndex = index + 1; pathIndex < expanded.length; pathIndex++) {
           if (!areConnected(expanded[pathIndex - 1].candidate, expanded[pathIndex].candidate)) {
             connectedPath = false;
             break;
           }
         }
+
         if (connectedPath) {
           repeatedIndex = index;
           break;
@@ -196,8 +195,10 @@ export function expandRepeatedFeatureBacktracks<TCandidate>(
 
       if (repeatedIndex >= 0) {
         const insertedKeys: string[] = [];
+
         for (let index = expanded.length - 2; index > repeatedIndex; index--) {
           const outwardRun = expanded[index];
+
           expanded.push({
             candidate: outwardRun.candidate,
             start: outwardRun.end,
@@ -205,9 +206,11 @@ export function expandRepeatedFeatureBacktracks<TCandidate>(
           });
           insertedKeys.push(getKey(outwardRun.candidate));
         }
+
         inferred.push({ repeatedKey: currentKey, insertedKeys });
       }
     }
+
     expanded.push(current);
   }
 
@@ -222,13 +225,17 @@ export function connectedTracePrefix<TCandidate>(
 ): { runs: TrackFeatureTraceRun<TCandidate>[]; rejected?: RejectedTraceTransition<TCandidate> } {
   if (runs.length === 0) return { runs: [] };
   const connected = [{ ...runs[0] }];
+
   for (let index = 1; index < runs.length; index++) {
     const previous = connected[connected.length - 1];
     const current = runs[index];
+
     if (!areConnected(previous.candidate, current.candidate)) {
       return { runs: connected, rejected: { from: previous.candidate, to: current.candidate, index } };
     }
+
     connected.push({ ...current });
   }
+
   return { runs: connected };
 }

@@ -2,15 +2,11 @@ import { MatchedWay } from "places-shared/services";
 import { RouteType } from "./RouteTypeDetector";
 import { CandidateKind, FeatureCandidate } from "./ClassifyTypes";
 
-// Every checked candidate appears in the name, ordered by its position along
-// the track ("Barrier Beach Trail to Little River to Laird-Norton Trail").
-// Ranking only picks the DEFAULT checked set.
-
 export interface SequenceItem {
   id: string;
   name: string;
-  // Position along the track (0-1) used for ordering.
   fraction: number;
+  containsTrack?: boolean;
 }
 
 // Lower rank = better default destination.
@@ -35,33 +31,43 @@ export function wayId(way: MatchedWay): string {
   return `way:${way.name.toLowerCase()}`;
 }
 
-// The route-type suffix ("Loop", "Out and Back") is itself a checkable part of
-// the name.
 export function composeSequenceName(items: SequenceItem[], routeType: RouteType, includeSuffix: boolean, datePrefix?: string): string {
-  const ordered = [...items].sort((a, b) => a.fraction - b.fraction);
+  const ordered = [...items].sort((a, b) => {
+    if (Boolean(a.containsTrack) !== Boolean(b.containsTrack)) return a.containsTrack ? -1 : 1;
 
-  // Drop names that repeat a similar neighbor ("Kilburn Loop" then "Kilburn Loop Trail")
-  const names: string[] = [];
+    return a.fraction - b.fraction;
+  });
+
+  const uniqueItems: SequenceItem[] = [];
+
   for (const item of ordered) {
-    if (names.length === 0 || !namesAreSimilar(names[names.length - 1], item.name)) {
-      names.push(item.name);
+    if (uniqueItems.length === 0 || !namesAreSimilar(uniqueItems[uniqueItems.length - 1].name, item.name)) {
+      uniqueItems.push(item);
     }
   }
 
   const suffix = includeSuffix ? routeSuffixLabel(routeType) : undefined;
-  const base = composeBase(names, suffix, routeType);
+  const base = composeBase(uniqueItems, suffix, routeType);
 
-  // Lead with the date segment ("20260709 - Barrier Beach Trail to Little River Loop").
   if (datePrefix) return base ? `${datePrefix} - ${base}` : datePrefix;
+
   return base;
 }
 
-function composeBase(names: string[], suffix: string | undefined, routeType: RouteType): string {
-  if (names.length === 0) return suffix ?? '';
+function composeBase(items: SequenceItem[], suffix: string | undefined, routeType: RouteType): string {
+  if (items.length === 0) return suffix ?? '';
 
-  const sequence = names.join(' to ');
+  const contextualNames = items.filter(item => item.containsTrack).map(item => item.name);
+  const positionalNames = items.filter(item => !item.containsTrack).map(item => item.name);
+  const names = items.map(item => item.name);
+
+  const sequence = routeType === 'loop' && contextualNames.length > 0 && positionalNames.length > 0
+    ? `${contextualNames.join(' and ')} via ${positionalNames.join(' and ')}`
+    : names.join(' to ');
+
   if (!suffix) return sequence;
   if (routeType === 'loop' && /\bloop\b/i.test(names[names.length - 1])) return sequence;
+
   return `${sequence} ${suffix}`;
 }
 
@@ -74,6 +80,7 @@ export const ROUTE_SUFFIX_ID = 'route:suffix';
 export function routeSuffixLabel(routeType: RouteType): string | undefined {
   if (routeType === 'loop') return 'Loop';
   if (routeType === 'out-and-back') return 'Out and Back';
+
   return undefined;
 }
 
@@ -89,15 +96,18 @@ export function defaultSelectionIds(ways: MatchedWay[], features: FeatureCandida
     .filter(w => w.coverage >= DEFAULT_WAY_COVERAGE)
     .sort((a, b) => b.coverage - a.coverage)
     .slice(0, DEFAULT_MAX_WAYS);
+
   // Fall back to the single dominant way when nothing clears the coverage bar
   if (significantWays.length === 0 && nameableWays.length > 0) {
     significantWays.push(nameableWays.reduce((best, way) => way.coverage > best.coverage ? way : best));
   }
+
   for (const way of significantWays) {
     selected.add(wayId(way));
   }
 
   const destination = pickDestination(features.filter(f => !significantWays.some(w => namesAreSimilar(w.name, f.name))));
+
   if (destination) {
     selected.add(destination.id);
   }
@@ -111,7 +121,9 @@ export function pickDestination(features: FeatureCandidate[]): FeatureCandidate 
   return [...features].sort((a, b) => {
     if (a.containsTrack !== b.containsTrack) return a.containsTrack ? -1 : 1;
     const rankDiff = KIND_RANK[a.kind] - KIND_RANK[b.kind];
+
     if (rankDiff !== 0) return rankDiff;
+
     return a.distanceMeters - b.distanceMeters;
   })[0];
 }

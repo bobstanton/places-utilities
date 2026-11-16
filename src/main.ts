@@ -1,8 +1,9 @@
 import { Plugin, setIcon, type App } from 'obsidian';
 import type { IPlaceExtensionSettings, IPlacesExtensionHostSettings } from "places-shared/settings";
-import type { IPlacePluginExtension, IPlacePluginExtensionExports, IPlacesHostServices } from "places-shared/services";
-import { registerPlaceExtensionLifecycle, PLACES_EXTENSION_API_VERSION } from "places-shared/services";
+import type { IPlacePluginExtension, IPlacePluginExtensionExports, IPlacesHostServices } from "places-shared/obsidian/services";
+import { registerPlaceExtensionLifecycle, PLACES_EXTENSION_API_VERSION } from "places-shared/obsidian/services";
 import { configureRequestLogging } from "places-shared/utils";
+import { configureOverpassUsage } from './classify/OverpassRateLimiter';
 import { ClassifyBlockProcessor } from './classify/ClassifyBlockProcessor';
 import type { RenderContext } from './generated-help/index.generated';
 import * as classifyHelp from './generated-help/classify-help.generated';
@@ -11,6 +12,7 @@ import * as playbackHelp from './generated-help/playback-help.generated';
 import { ALL_CODE_BLOCK_DEFINITIONS, ALL_HIGHLIGHT_CONFIGS } from './CodeBlockDefinitions';
 import { createTrackBuilderMapTool } from './track-builder/TrackBuilderMapTool';
 import { trackPlaybackMapTool } from './playback/TrackPlaybackMapTool';
+import "places-shared/block-styles.css";
 import "places-shared/error-styles.css";
 import "places-shared/loading-styles.css";
 import "./styles.css";
@@ -26,6 +28,7 @@ export default class PlacesUtilitiesPlugin extends Plugin implements IPlacePlugi
 
   getPlaceExports(app: App, _extensionSettings: IPlaceExtensionSettings, mainSettings: IPlacesExtensionHostSettings, host: IPlacesHostServices): IPlacePluginExtensionExports {
     configureRequestLogging(mainSettings.developerMode);
+    configureOverpassUsage(host.apiUsage);
     this.host = host;
     const codeBlockProcessors: NonNullable<IPlacePluginExtensionExports['codeBlockProcessors']> = [
       {
@@ -43,13 +46,15 @@ export default class PlacesUtilitiesPlugin extends Plugin implements IPlacePlugi
     ];
 
     const classifyProcessor = new ClassifyBlockProcessor(app, mainSettings, host);
+
     codeBlockProcessors.push({
       blockType: 'places-classify',
       processor: (source, el, ctx) => classifyProcessor.processCodeBlock(source, el, ctx),
     });
+
     return {
       apiVersion: PLACES_EXTENSION_API_VERSION,
-      mapTools: [createTrackBuilderMapTool(mainSettings.units), trackPlaybackMapTool],
+      mapTools: [createTrackBuilderMapTool(), trackPlaybackMapTool],
       codeBlockProcessors,
       codeBlockDefinitions: ALL_CODE_BLOCK_DEFINITIONS,
       highlightConfigs: ALL_HIGHLIGHT_CONFIGS
@@ -63,6 +68,7 @@ export default class PlacesUtilitiesPlugin extends Plugin implements IPlacePlugi
       renderDynamic: (container, key) => this.renderDynamicHelp(container, key),
       setIcon: (element: HTMLElement, iconId: string) => setIcon(element, iconId),
     };
+
     page.render(el.createDiv({ cls: "places-help-container" }), context);
   }
 
@@ -72,9 +78,12 @@ export default class PlacesUtilitiesPlugin extends Plugin implements IPlacePlugi
   private renderDynamicHelp(container: HTMLElement, key: string): void {
     if (key === 'trackMatchProviderNames') {
       const names = [...(this.host?.trackMatch.getNames() ?? [])].sort((a, b) => a.localeCompare(b));
+
       container.createSpan({ text: names.length > 0 ? names.join(', ') : 'no track-match providers installed' });
+
       return;
     }
+
     container.createSpan({ text: `{{${key}}}` });
   }
 }

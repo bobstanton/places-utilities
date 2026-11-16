@@ -2,6 +2,7 @@ import { Coordinate, DistanceCalculator } from "places-shared/geo";
 import { logger as rootLogger } from "places-shared/utils";
 import { CANDIDATE_KIND_ICONS, CandidateKind, FeatureCandidate } from "./ClassifyTypes";
 import { OverpassRateLimiter } from "./OverpassRateLimiter";
+import type { ApiUsageOrigin } from "places-shared/services";
 
 const logger = rootLogger.scope('OverpassTrackService');
 
@@ -24,23 +25,13 @@ interface OverpassResponse {
   elements?: OverpassElement[];
 }
 
-// Finds named OSM features along a track using two Overpass primitives that
-// run against real geometry instead of tile label points:
-// - `around:` with a linestring finds features within a corridor of the whole track in one query
-// - `is_in()` finds named areas (lakes, parks, reserves) CONTAINING a point: a
-//   point anywhere on a lake resolves to the lake regardless of where its label sits
 export class OverpassTrackService {
-
-  // Corridor features and containing areas for the whole track in ONE Overpass
-  // request. Corridor features come back as node/way/relation elements (with
-  // center coordinates); containing areas as type "area" - the parser splits
-  // on element type.
-  async queryTrackContext(coordinates: Coordinate[], radiusMeters: number, containmentPoints: Coordinate[]): Promise<{ corridor: FeatureCandidate[]; containing: FeatureCandidate[] }> {
+  async queryTrackContext(coordinates: Coordinate[], radiusMeters: number, containmentPoints: Coordinate[], origin?: ApiUsageOrigin): Promise<{ corridor: FeatureCandidate[]; containing: FeatureCandidate[] }> {
     if (coordinates.length < 2) return { corridor: [], containing: [] };
 
     const corridorLine = resampleForCorridor(coordinates);
     const query = buildTrackContextQuery(corridorLine, radiusMeters, containmentPoints);
-    const data = await OverpassRateLimiter.request<OverpassResponse>(query);
+    const data = await OverpassRateLimiter.request<OverpassResponse>(query, origin);
 
     const corridor: FeatureCandidate[] = [];
     const containing: FeatureCandidate[] = [];
@@ -49,6 +40,7 @@ export class OverpassTrackService {
       if (element.type === 'area') {
         const name = element.tags?.name;
         const kind = categorizeTags(element.tags ?? {});
+
         if (!name || !kind) continue;
         containing.push({
           id: `area/${element.id}`,
@@ -63,11 +55,13 @@ export class OverpassTrackService {
         });
       } else {
         const candidate = corridorElementToCandidate(element, corridorLine);
+
         if (candidate) corridor.push(candidate);
       }
     }
 
     logger.debug(`Track context query returned ${data.elements?.length ?? 0} elements: ${corridor.length} corridor, ${containing.length} containing`);
+
     return { corridor: dedupeByName(corridor), containing: dedupeByName(containing) };
   }
 }
@@ -79,6 +73,7 @@ export function resampleForCorridor(coordinates: Coordinate[], sampleMeters = CO
 
   for (let i = 1; i < coordinates.length; i++) {
     accumulated += DistanceCalculator.haversineDistanceMeters(coordinates[i - 1].latitude, coordinates[i - 1].longitude, coordinates[i].latitude, coordinates[i].longitude);
+
     if (accumulated >= sampleMeters) {
       sampled.push(coordinates[i]);
       accumulated = 0;
@@ -86,6 +81,7 @@ export function resampleForCorridor(coordinates: Coordinate[], sampleMeters = CO
   }
 
   const last = coordinates[coordinates.length - 1];
+
   if (sampled[sampled.length - 1] !== last) {
     sampled.push(last);
   }
@@ -94,9 +90,11 @@ export function resampleForCorridor(coordinates: Coordinate[], sampleMeters = CO
 
   const reduced: Coordinate[] = [];
   const step = (sampled.length - 1) / (maxPoints - 1);
+
   for (let i = 0; i < maxPoints; i++) {
     reduced.push(sampled[Math.round(i * step)]);
   }
+
   return reduced;
 }
 
@@ -154,6 +152,7 @@ export function categorizeTags(tags: Record<string, string>): CandidateKind | un
   if (tags.boundary === 'national_park' || tags.boundary === 'protected_area') return 'park';
   if (tags.amenity === 'restaurant' || tags.amenity === 'cafe' || tags.amenity === 'fast_food' || tags.amenity === 'ice_cream' || tags.amenity === 'pub' || tags.amenity === 'bar') return 'restaurant';
   if (tags.shop) return 'store';
+
   return undefined;
 }
 
@@ -161,10 +160,12 @@ function corridorElementToCandidate(element: OverpassElement, corridor: Coordina
   const tags = element.tags ?? {};
   const name = tags.name;
   const kind = categorizeTags(tags);
+
   if (!name || !kind) return null;
 
   const lat = element.lat ?? element.center?.lat;
   const lon = element.lon ?? element.center?.lon;
+
   if (lat === undefined || lon === undefined) return null;
 
   const nearest = nearestCorridorPoint({ latitude: lat, longitude: lon }, corridor);
@@ -191,10 +192,13 @@ export function nearestCorridorPoint(point: Coordinate, corridor: Coordinate[]):
   let min = Infinity;
   const distances = corridor.map(trackPoint => {
     const dist = DistanceCalculator.haversineDistanceMeters(point.latitude, point.longitude, trackPoint.latitude, trackPoint.longitude);
+
     if (dist < min) min = dist;
+
     return dist;
   });
   const index = distances.findIndex(dist => dist <= min + NEAR_MINIMAL_METERS);
+
   return { index, distanceMeters: min };
 }
 
@@ -205,10 +209,12 @@ function dedupeByName(candidates: FeatureCandidate[]): FeatureCandidate[] {
   for (const candidate of candidates) {
     const key = candidate.name.toLowerCase();
     const existing = byName.get(key);
+
     if (!existing) {
       byName.set(key, candidate);
       continue;
     }
+
     if ((candidate.containsTrack && !existing.containsTrack) || (candidate.containsTrack === existing.containsTrack && candidate.distanceMeters < existing.distanceMeters)) {
       byName.set(key, candidate);
     }

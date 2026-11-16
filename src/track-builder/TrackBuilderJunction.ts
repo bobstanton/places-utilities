@@ -1,4 +1,4 @@
-import type { TrackBuilderCoordinate, TrackBuilderLinePosition, TrackBuilderSection } from 'places-shared/map';
+import type { TrackBuilderCoordinate, TrackBuilderLinePosition, TrackBuilderSection } from 'places-utilities/core';
 import type { TrackBuilderSelectionPoint } from './TrackBuilderSelection';
 
 export interface TrackBuilderJunctionConnection {
@@ -51,8 +51,10 @@ export function compatibleTrackBuilderJunctions(
       const aPoint = project(aCoordinate);
       const bPoint = project(bCoordinate);
       const screenDistancePixels = Math.hypot(aPoint[0] - bPoint[0], aPoint[1] - bPoint[1]);
+
       if (screenDistancePixels > maximumScreenDistancePixels) continue;
       const geographicDistanceMeters = geographicDistance(aCoordinate, bCoordinate);
+
       if (geographicDistanceMeters > maximumGeographicDistanceMeters) continue;
       const candidate = {
         a: vertexPosition(aIndex, aCoordinates.length),
@@ -60,6 +62,7 @@ export function compatibleTrackBuilderJunctions(
         screenDistancePixels,
         geographicDistanceMeters,
       };
+
       junctions.push(candidate);
     }
   }
@@ -73,6 +76,7 @@ export function areTrackBuilderJunctionSectionsCompatible(a: TrackBuilderSection
   if (!a.sourceLayer || !b.sourceLayer) return true;
   const aGrade = grade(a.sourceProperties);
   const bGrade = grade(b.sourceProperties);
+
   return aGrade.structure === bGrade.structure
     && aGrade.layer === bGrade.layer
     && (aGrade.level === undefined || bGrade.level === undefined || aGrade.level === bGrade.level);
@@ -89,6 +93,7 @@ function grade(properties: TrackBuilderSection['sourceProperties']): {
     : brunnel === 'tunnel' || truthy(properties?.tunnel)
       ? 'tunnel'
       : 'ground';
+
   return {
     structure,
     layer: normalized(properties?.layer) ?? '0',
@@ -100,11 +105,13 @@ function normalized(value: unknown): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value === 'string') return value.trim().toLowerCase();
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value).trim().toLowerCase();
+
   return undefined;
 }
 
 function truthy(value: unknown): boolean {
   const normalizedValue = normalized(value);
+
   return normalizedValue !== undefined && normalizedValue !== '0' && normalizedValue !== 'false' && normalizedValue !== 'no';
 }
 

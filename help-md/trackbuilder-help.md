@@ -30,7 +30,7 @@ tools:
 | tracks                 | Ordered list of track notes or files               | `- [[Morning Run - Monday]]` |
 | id                     | Session identity for the draft                     | commute-draft                |
 | name                   | Exported GPX track name and filename               | Lake Loop                    |
-| snapRadiusMeters       | Initial magnet distance in metres                  | 25                           |
-| respectGradeSeparation | Keep bridges, tunnels, layers, and levels separate | true, **false** |
+| snapRadiusMeters       | Initial magnet distance in meters                  | 25                           |
+| respectGradeSeparation | Keep bridges, tunnels, layers, and levels separate | true, **false**              |
 | selectableLayers       | List of rendered layer or source-layer names       | transportation               |
 

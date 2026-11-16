@@ -1,5 +1,5 @@
 import { App, Modal, Setting } from 'obsidian';
-import type { TrackBuilderWaypoint } from 'places-shared/map';
+import type { TrackBuilderWaypoint } from 'places-utilities/core';
 
 export interface TrackBuilderWaypointEdit {
   readonly name?: string;
@@ -7,20 +7,12 @@ export interface TrackBuilderWaypointEdit {
   readonly description?: string;
 }
 
-// Edits the fields of a single GPX waypoint. Only the three the builder owns
-// are offered; everything else in the original `<wpt>` is preserved untouched
-// by the serializer, and this dialog never has to represent it.
 export class TrackBuilderWaypointModal extends Modal {
   private name: string;
   private symbol: string;
   private description: string;
 
-  constructor(
-    app: App,
-    waypoint: TrackBuilderWaypoint,
-    private readonly onSubmit: (edit: TrackBuilderWaypointEdit) => void,
-    private readonly onDelete: () => void,
-  ) {
+  constructor(app: App, waypoint: TrackBuilderWaypoint, private readonly onSubmit: (edit: TrackBuilderWaypointEdit) => void, private readonly onDelete: () => void) {
     super(app);
     this.name = waypoint.name ?? '';
     this.symbol = waypoint.symbol ?? '';
@@ -29,6 +21,7 @@ export class TrackBuilderWaypointModal extends Modal {
 
   onOpen(): void {
     const { contentEl } = this;
+
     contentEl.createEl('h1', { text: 'Edit waypoint' });
 
     new Setting(contentEl)
@@ -47,7 +40,7 @@ export class TrackBuilderWaypointModal extends Modal {
 
     new Setting(contentEl)
       .setName('Symbol')
-      .setDesc('GPX sym value. An emoji renders as the marker icon; a name such as Summit is kept for other GPX tools.')
+      .setDesc('Waypoint symbol value. Emoji render directly; named values use the waypoint icon mapping.')
       .addText(text => text.setValue(this.symbol).onChange(value => { this.symbol = value; }));
 
     new Setting(contentEl)
@@ -58,7 +51,7 @@ export class TrackBuilderWaypointModal extends Modal {
     new Setting(contentEl)
       .addButton(button => button
         .setButtonText('Delete waypoint')
-        .setWarning()
+        .setDestructive()
         .onClick(() => {
           this.close();
           this.onDelete();

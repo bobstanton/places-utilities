@@ -80,6 +80,7 @@ function calculateTrackOverlap(coordinates: Coordinate[], bufferM: Meters): numb
 
   for (let i = 0; i < secondHalf.length; i += sampleRate) {
     const point = secondHalf[i];
+
     sampledCount++;
 
     // Check against EVERY first-half point: sampling the first half leaves gaps

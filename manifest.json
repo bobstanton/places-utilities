@@ -1,7 +1,7 @@
 {
 	"id": "places-utilities",
 	"name": "Places Utilities",
-	"version": "0.0.1",
+	"version": "0.0.2",
 	"minAppVersion": "1.13.0",
 	"description": "Companion utilities for Places, with track classification, track naming, track building, and route playback.",
 	"author": "Bob Stanton",
